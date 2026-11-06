@@ -1,0 +1,17 @@
+# MATLAB autosave / backup files
+*.asv
+*.autosave
+*.m~
+
+# MATLAB compiled / cache
+*.mex*
+slprj/
+codegen/
+
+# Generated .mat files (regenerate from data_cleaning/); raw data in data/raw/ IS tracked
+*.mat
+!data/raw/*.mat
+
+# OS junk
+.DS_Store
+Thumbs.db
