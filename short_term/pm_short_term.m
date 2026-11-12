@@ -84,8 +84,9 @@ info.clean.kept = sprintf('%d of %d rows', numel(tr.t), n0);
 %   * it has >= 5% of the samples of the busiest coordinate.
 % The last rule fixes a real bug: Foshan mobile #2 parks at a depot, and its
 % GPS jitter spreads it over ~70 coordinates with ~300 samples each and
-% >50% hourly coverage. Those passed as "static sites", outvoted the 4 real
-% ones, and short-term NRMSE under 1-sigma noise went 0.189 -> 0.336.
+% >50% hourly coverage. Those passed as "static sites" and outvoted the 4
+% real ones. Ablation (st_validate.m) without this rule: NRMSE 0.2165 /
+% 0.6052 / 0.6098 at noise 0 / 0.5 / 1.0 sigma, vs 0.1856 / 0.1862 / 0.1873.
 % (5%, not more: co-located sensors - Tianjin static 1/3/4 - triple the
 % count of their shared coordinate.)
 th = floor(tr.t * 24); nHours = max(th) - min(th) + 1;
