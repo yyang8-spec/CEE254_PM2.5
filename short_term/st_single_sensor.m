@@ -177,8 +177,16 @@ fprintf('\n[3] MODELS: %d hourly origins (%s .. %s); validation = first %d, test
     nO, datestr(origins(1)), datestr(origins(end)), sum(isVal), sum(~isVal));
 
 models = {'B0 train mean', 'B1 persist last 1 h', 'B2 persist last 10 min', ...
-          'B3 daily profile', 'M1 linear (levels)', 'M2 ridge on change', 'M3 ridge on change + met'};
+          'B3 daily profile', 'M1 linear (levels)', 'M2 ridge on change', 'M3 ridge on change + met', ...
+          'S1 EWMA tau 5 min', 'S2 EWMA tau 10 min', 'S3 EWMA tau 20 min', 'S4 EWMA tau 30 min', ...
+          'W1 mean last 20 min', 'W2 mean last 30 min', 'S* EWMA tau chosen on val'};
 lambdas = [0 1 10 100 1e3 1e4];
+% Exponential smoothing (simple exponential smoothing / EWMA) of the 1-min
+% bins before the origin: level = sum(w.*pm)/sum(w), w = exp(-age/tau).
+% Persistence of the last 10-min bin is the tau -> 0 / single-bin limit; a
+% longer tau averages more samples (less noise) but reacts more slowly.
+tausFixed = [5 10 20 30];               % minutes, models S1..S4
+tauGrid   = [2 5 10 15 20 30 45 60];    % searched on validation for S*
 
 results = struct();
 for nf = NOISE
@@ -186,9 +194,11 @@ for nf = NOISE
     Xn = X; randn('seed', 1); %#ok<RAND>
     Xn(:,5) = Xn(:,5) + nf * sig * randn(size(Xn,1),1);
     Bn = bin_series(Xn, 10); Bn.pm(Bn.n < minCount) = NaN;
+    Bm = bin_series(Xn, 1);  Bm.pm(Bm.n < 10) = NaN;   % 1-min bins (>= half of 20 samples)
 
     errs = nan(nO, 3, numel(models)); truth = nan(nO, 3);
     errsL = nan(nO, 3, numel(lambdas), 2);       % ridge-lambda search for M2/M3
+    errsT = nan(nO, 3, numel(tauGrid));           % EWMA tau search for S*
     for i = 1:nO
         t0 = origins(i);
         % truth: CLEAN hourly means of the next 3 hours (the grader's truth is noise-free)
@@ -224,6 +234,17 @@ for nf = NOISE
             end
         end
         errs(i,:,1:5) = permute(pr(:,1:5) - truth(i,:)', [3 1 2]);
+        % smoothing models on the 1-min bins of the last 3 h before t0
+        r = Bm.t >= t0 - 3/24 & Bm.t < t0 & isfinite(Bm.pm);
+        age = (t0 - Bm.t(r)) * 1440; pmr = Bm.pm(r);      % minutes before origin
+        for j = 1:numel(tausFixed)
+            errs(i,:,7+j) = ewma(pmr, age, tausFixed(j)) - truth(i,:);
+        end
+        errs(i,:,12) = mean(pmr(age <= 20)) - truth(i,:);
+        errs(i,:,13) = mean(pmr(age <= 30)) - truth(i,:);
+        for j = 1:numel(tauGrid)
+            errsT(i,:,j) = ewma(pmr, age, tauGrid(j)) - truth(i,:);
+        end
     end
     % choose ridge lambda on VALIDATION origins only
     for mm = 1:2
@@ -231,10 +252,14 @@ for nf = NOISE
         [~, best] = min(score); bestL(mm) = lambdas(best); %#ok<SAGROW>
         errs(:,:,5+mm) = errsL(:,:,best,mm);
     end
+    scoreT = squeeze(sqrt(mean(mean(errsT(isVal,:,:).^2, 2, 'omitnan'), 1, 'omitnan')));
+    [~, bt] = min(scoreT); bestTau = tauGrid(bt);
+    errs(:,:,14) = errsT(:,:,bt);
     key = sprintf('noise_%02d', round(nf*10));
     results.(key).errs = errs; results.(key).truth = truth; results.(key).lambda = bestL;
+    results.(key).tau = bestTau; results.(key).tauGrid = tauGrid; results.(key).tauValScore = scoreT;
 
-    fprintf('\n    noise %.1f sigma   (ridge lambda chosen on validation: M2 %g, M3 %g)\n', nf, bestL);
+    fprintf('\n    noise %.1f sigma   (chosen on validation: ridge lambda M2 %g, M3 %g; EWMA tau %g min)\n', nf, bestL, bestTau);
     fprintf('    %-26s %10s %10s   test NRMSE by horizon h=1/2/3\n', 'model', 'val NRMSE', 'test NRMSE');
     for mdl = 1:numel(models)
         e = errs(:,:,mdl); ok = all(isfinite(e),2) & all(isfinite(truth),2);
@@ -255,6 +280,13 @@ if MAKE_FIGS
     legend('truth (next hour)', 'persistence 10 min', 'M3 ridge + met', 'val | test');
     title(sprintf('Foshan static #%d: 1-h-ahead forecasts', SENSOR));
     print(f, fullfile(FIGDIR, sprintf('st_s%d_forecasts.png', SENSOR)), '-dpng', '-r150');
+end
+
+% keep everything needed for the cross-sensor comparison (st_compare_sensors.m)
+if exist('SAVE_RESULTS', 'var') && SAVE_RESULTS
+    out = fullfile(ROOT, 'short_term', sprintf('results_s%d.mat', SENSOR));
+    save(out, 'results', 'models', 'origins', 'isVal', 'SENSOR', 'NOISE', '-v7');
+    fprintf('    saved %s\n', out);
 end
 
 %% =========================== helpers ======================================
@@ -333,6 +365,12 @@ for i = 1:numel(x)
     s = x(max(1, i-k+1):i); s = s(isfinite(s));
     if ~isempty(s), m(i) = mean(s); end
 end
+end
+
+function m = ewma(p, age, tau)
+% exponentially weighted mean of samples p that are age minutes old
+w = exp(-age / tau);
+m = sum(w .* p) / sum(w);
 end
 
 function v = last_valid(x)
