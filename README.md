@@ -47,11 +47,21 @@ Optional outside data suggested by the course:
 - Population: https://landscan.ornl.gov/
 - Building footprints/zoning: https://download.geofabrik.de/index.html
 
+## Quick start
+```matlab
+run('data_cleaning/export_device_matrices.m')  % once: tables -> numeric matrices in data/processed/
+run('validation/run_validation.m')             % backtest: our model vs. baselines vs. ablations
+```
+The competition entry point is `src/pm2d5_pred_model.m`. The approach, findings and roadmap are in [`docs/PLAN.md`](docs/PLAN.md).
+
 ## Repo layout
 ```
+src/               pm2d5_pred_model.m - the competition function (single file)
+validation/        make_task (competition-style splits), baselines, NRMSE, run_validation
+docs/PLAN.md       approach, data findings, backtest numbers, roadmap, team split
 data/raw/          original .mat files from Canvas; never edit these
-data/processed/    cleaned outputs from data_cleaning/
-data_cleaning/     cleaning scripts (in progress)
+data/processed/    numeric device matrices from data_cleaning/ (git-ignored)
+data_cleaning/     cleaning / exploration notebooks + export_device_matrices.m
 figures/           exported plots for the report/presentation
 ```
 
