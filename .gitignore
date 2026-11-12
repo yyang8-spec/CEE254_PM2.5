@@ -15,3 +15,6 @@ codegen/
 # OS junk
 .DS_Store
 Thumbs.db
+
+# Octave crash dumps
+octave-workspace

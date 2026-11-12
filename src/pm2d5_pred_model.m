@@ -85,7 +85,8 @@ o.mobile_min_hours  = 3;
 switch problem_type
     case 1
         o.bin_min     = 10;   % static sites binned at 10 min
-        o.persist_bins = 1;   % persistence of the last 10 min
+        o.persist_bins = 1;   % persistence of the last 10 min...
+        o.min_samples = 1000; % ...or longer, until >= this many raw samples
         o.ar_damp     = false;% AR damping toward 24 h mean: hurt in backtest
     case 2
         o.bin_min     = 60;
@@ -299,7 +300,16 @@ end
 % =============================================================================
 function [L, sL] = level_short(tgt, site, opts)
 Lc = site.L; v = find(isfinite(Lc));
-last = mean(Lc(v(max(1, end - opts.persist_bins + 1):end)));
+% Sample-weighted level over the most recent bins: take at least
+% persist_bins bins and keep going back until min_samples raw samples are
+% covered. A single sparse bin at a data edge is otherwise very noise-prone.
+A = site.S - site.offset; Nw = site.N; Nw(~isfinite(A)) = 0; A(~isfinite(A)) = 0;
+num = 0; den = 0; nb = 0;
+for b = v(end):-1:1
+    num = num + sum(Nw(b, :) .* A(b, :)); den = den + sum(Nw(b, :)); nb = nb + 1;
+    if nb >= opts.persist_bins && den >= opts.min_samples, break; end
+end
+last = num / max(den, 1);
 tLast = site.tb(v(end));
 hz = max(tgt.t - tLast, 0) * 24;               % horizon in hours
 if opts.ar_damp
