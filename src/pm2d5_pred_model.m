@@ -92,7 +92,8 @@ switch problem_type
     case 2
         o.bin_min     = 60;
         o.use_met     = true; % humidity regression
-        o.use_tmp     = true; % ...plus temperature
+        o.use_tmp     = false;% separate temperature term (unstable corr; 0.369 with RH)
+        o.hum_feature = 'dewpt'; % 'rh' | 'dewpt' | 'both'. Dew point: 0.361 vs RH+T 0.371
         o.use_diurnal = false;% 24 h/12 h harmonics: hurt in backtest (0.413 vs 0.371)
         o.use_ar_resid = true;
         o.ridge       = 1e-3;
@@ -366,7 +367,13 @@ end
 
 function X = design(t, h, tm, opts)
 X = ones(numel(t), 1);
-if opts.use_met, X = [X, h(:)]; end
+if opts.use_met
+    switch opts.hum_feature
+        case 'rh',     X = [X, h(:)];
+        case 'dewpt',  X = [X, dewpoint(tm(:), h(:))];
+        case 'both',   X = [X, h(:), dewpoint(tm(:), h(:))];
+    end
+end
 if opts.use_met && opts.use_tmp, X = [X, tm(:)]; end
 if opts.use_diurnal
     w = 2 * pi * mod(t(:), 1);                 % fraction of day
@@ -446,4 +453,12 @@ for j = 1:size(x, 2)
     c = x(isfinite(x(:, j)), j); if ~isempty(c), m(j) = median(c); end
 end
 if dim == 2, m = m.'; end
+end
+
+function td = dewpoint(T, RH)
+% Magnus formula, deg C. Dew point tracks absolute moisture, which in the
+% Tianjin data correlates with PM2.5 more strongly than relative humidity.
+a = 17.62; b = 243.12;
+g = log(min(max(RH, 1), 100) / 100) + a * T ./ (b + T);
+td = b * g ./ (a - g);
 end
