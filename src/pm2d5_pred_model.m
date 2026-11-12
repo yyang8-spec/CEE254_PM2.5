@@ -92,7 +92,7 @@ switch problem_type
     case 2
         o.bin_min     = 60;
         o.use_met     = true; % humidity regression
-        o.use_tmp     = false;% separate temperature term (unstable corr; 0.369 with RH)
+        o.use_tmp     = false;% separate temperature term: corr with PM unstable across weeks
         o.hum_feature = 'dewpt'; % 'rh' | 'dewpt' | 'both'. Dew point: 0.361 vs RH+T 0.371
         o.use_diurnal = false;% 24 h/12 h harmonics: hurt in backtest (0.413 vs 0.371)
         o.use_ar_resid = true;
