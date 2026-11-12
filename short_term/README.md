@@ -98,3 +98,43 @@ Test NRMSE pooled over the 5 Foshan static sensors (59 test origins each):
    | Without the site offset (τ = 10) | 0.1934 | 0.1938 | 0.1945 |
 
    The optimum is shorter than in the single-sensor study (10 min) because the competition function pools 4 sensors, so it has 4× the samples per minute and the noise is already averaged down.
+
+## Do the other sensors or the mobile data help? (11/12, Python prototypes, leave-one-sensor-out)
+
+**1. Ridge on multi-sensor features: no.** The features came from the 4 other static sensors: trends (EWMA 5 vs 30 min and 5 vs 120 min), reversion to the 3-day mean, the spread / max / min of their 30-min changes, the nearest sensor's change, hour of day, and the future dew-point change. Ridge predicted the change, with no intercept and λ chosen on validation.
+
+| | Val | Test |
+|---|---|---|
+| Persistence (EWMA 5 + IDW offset) | 0.1467 | **0.1893** |
+| Ridge, λ = 1000 (chosen on val) | **0.1424** | 0.1919 |
+| Ridge, λ = 0 | 0.1840 | 0.2091 |
+
+Same pattern as the single-sensor study: ridge wins on validation and loses on test.
+
+**2. Where the remaining error is** (oracle analysis: make one part exact and see what is left):
+
+| | NRMSE |
+|---|---|
+| Ours | 0.175 |
+| With the true site offset | 0.150 |
+| With the true future city level | 0.130 |
+| Both | 0.094 |
+
+The error grows with horizon (h=1/2/3: 0.138 / 0.172 / 0.208) only because the future level is unknown. With the true level it is flat at about 0.13.
+
+**3. Calibrated mobile data for the site offset: no, and it explains why.** Mobile passes near the test site, with per-vehicle bias calibrated near the training static sites (R = 0.2 / 0.5 / 1 km), blended with IDW by number of passes. Chosen on validation: R = 1 km, n0 = 200. Test: 0.1917, worse than IDW (0.1893). Every configuration is worse.
+
+Mobile minus the co-located static sensor (same minute, < 200 m):
+
+| | s1 | s2 | s3 | s4 | s5 |
+|---|---|---|---|---|---|
+| Median difference | +6.0 | **+13.9** | +3.5 | −8.9 (n = 186) | +7.1 |
+| True static offset | +1.9 | **−6.8** | **+7.5** | −2.6 | −0.1 |
+| Mobile-estimated offset (R = 0.5 km) | −0.4 | +1.8 | −0.1 | −2.3 | −1.7 |
+
+So the static sensors' offsets are **not seen by vehicles driving past them**. s2 reads about 7 low and s3 about 7 high, while the mobile sensors around both read close to the city average. The offsets are mostly **sensor-specific** (calibration or mounting), not real spatial differences in air quality. That is why IDW recovers them poorly and mobile data cannot recover them at all.
+
+**Implications**
+* About 0.186 is close to the realistic floor for short-term with this data. The 0.150 "true offset" bound needs information about the test sensor itself, which we don't have.
+* Keep mobile data out of the short-term prediction. It is still useful as a fallback when the static data in `train_data` is missing.
+* For the report (failure conditions, section j): if a competition test sensor has a calibration offset like s2 or s3 (±7 µg/m³), no method based on the other sensors can predict it. This is an irreducible error source.
