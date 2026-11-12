@@ -92,7 +92,7 @@ switch problem_type
         o.bin_min     = 60;
         o.use_met     = true; % humidity regression
         o.use_tmp     = true; % ...plus temperature
-        o.use_diurnal = true; % 24 h and 12 h harmonics
+        o.use_diurnal = false;% 24 h/12 h harmonics: hurt in backtest (0.413 vs 0.371)
         o.use_ar_resid = true;
         o.ridge       = 1e-3;
     case 3
