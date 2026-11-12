@@ -1,4 +1,4 @@
-%ST_VALIDATE  Validate pm_short_term.m the way the competition will score it.
+%ST_VALIDATE  Validate src/pm_short_term.m the way the competition will score it.
 %
 % DESIGN (why it looks like this)
 %   * The competition test sites are fixed locations with NO data in
@@ -22,7 +22,7 @@
 % Set QUICK = true for a fast check (a forecast every 12 h instead of 3 h).
 
 ROOT = fileparts(fileparts(mfilename('fullpath')));
-addpath(fullfile(ROOT, 'short_term')); addpath(fullfile(ROOT, 'validation'));
+addpath(fullfile(ROOT, 'src')); addpath(fullfile(ROOT, 'validation'));
 if ~exist('QUICK', 'var'), QUICK = false; end
 if ~exist('NOISE', 'var'), NOISE = [0 0.5 1.0]; end
 

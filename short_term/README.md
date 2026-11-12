@@ -1,6 +1,8 @@
 # Short-term prediction
 
-## The function: `pm_short_term.m` (problem_type 1)
+## The function: `src/pm_short_term.m` (problem_type 1)
+
+`src/pm2d5_pred_model.m` calls it for problem_type 1, so it is what gets submitted.
 
 ```matlab
 [pred, pred_sd, info] = pm_short_term(train_data, test_data);   % opts optional

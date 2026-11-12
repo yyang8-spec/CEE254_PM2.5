@@ -6,7 +6,7 @@
 %   run('short_term/st_uncertainty.m')
 
 ROOT = fileparts(fileparts(mfilename('fullpath')));
-addpath(fullfile(ROOT, 'src')); addpath(fullfile(ROOT, 'short_term')); addpath(fullfile(ROOT, 'validation'));
+addpath(fullfile(ROOT, 'src')); addpath(fullfile(ROOT, 'validation'));
 if ~exist('QUICK', 'var'), QUICK = false; end
 S = load(fullfile(ROOT, 'data', 'processed', 'devices_foshan.mat'));
 dev = S.dev; is_static = logical(S.is_static); st = find(is_static);

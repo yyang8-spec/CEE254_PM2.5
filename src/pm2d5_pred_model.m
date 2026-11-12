@@ -31,9 +31,6 @@ if nargin < 4 || isempty(opts), opts = struct(); end
 % short_term/st_validate.m. Set opts.legacy_short = true to use the older
 % in-file version below instead (kept only for comparison).
 if problem_type == 1 && ~(isfield(opts, 'legacy_short') && opts.legacy_short)
-    if exist('pm_short_term', 'file') ~= 2      % until it moves into src/
-        addpath(fullfile(fileparts(mfilename('fullpath')), '..', 'short_term'));
-    end
     [pred_pm2d5, pred_std] = pm_short_term(train_data, test_data, opts);
     return
 end
