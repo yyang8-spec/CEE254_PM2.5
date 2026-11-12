@@ -12,7 +12,7 @@ The script saves `figures/st_s3_cleaning.png`, `st_s3_correlation.png` and `st_s
 
 **Task:** from each hourly origin (11-Oct 00:00 to 15-Oct 21:00, 118 origins), use only the previous 3 days to predict the mean PM2.5 of each of the next 3 hours. Origins are split by time: the first 59 are validation (model and λ selection), the last 59 are test (reported once). The truth is always the clean signal; noise is added only to the training input, as in the competition.
 
-## Results (11/13, Octave)
+## Results (11/12, Octave)
 
 | Model | Val NRMSE | Test NRMSE | Test 1.0σ noise | Test h=1/2/3 |
 |---|---|---|---|---|
