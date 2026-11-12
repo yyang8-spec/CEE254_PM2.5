@@ -31,15 +31,38 @@ All of it is in `src/pm2d5_pred_model.m`: one file, plain MATLAB with no toolbox
    * **Type 3, interpolation:** IDW of the static readings in the same 5-min bin. If every sensor is blank in the window, it falls back to linear interpolation of `L` in time.
 7. **Uncertainty (second output):** horizon-dependent persistence error, or residual standard deviation with AR decay, combined with the spread of the site offsets. The report needs this.
 
-## 3. Results so far (backtest, NRMSE, lower is better)
+## 3. Results so far (MATLAB/Octave backtest, pooled NRMSE, lower is better)
 
-Prototype numbers from Python on the same split. The MATLAB numbers go in `docs/RESULTS.md` once `run_validation` finishes.
+From `validation/run_validation.m` on 11/12. Each held-out static sensor is a test site. Short-term uses windows every 3 h over the Foshan week; long-term and interpolation use one window every 2–3 days in Tianjin.
 
-| Task | Best simple baseline | Our current model | Notes |
+| Task | Train mean | Nearest sensor | Daily profile | **Ours (noise 0)** | **Ours (noise 1.0σ)** |
+|---|---|---|---|---|---|
+| 1 short-term, Foshan (585 values) | 0.527 | 0.216 | 0.601 | **0.187** | **0.189** |
+| 2 long-term, Tianjin (648 values) | 0.543 | 0.599 | 0.552 | **0.371** | **0.370** |
+| 3 interpolation, Tianjin (312 values) | 0.459 | 0.283 | 0.533 | **0.172** | **0.169** |
+
+Ablations at noise 0 (report section h):
+
+| Task | Variant | NRMSE | Takeaway |
 |---|---|---|---|
-| 1 short-term, Foshan | nearest-sensor persistence ≈ 0.217; training mean 0.449 | **≈ 0.175** | 10-min persistence + full offset beat 60-min persistence (0.187); adding a trend didn't help |
-| 2 long-term, Tianjin | training mean 0.55–0.61; AR(1) 0.49–0.55 | **≈ 0.41–0.46** | humidity/temperature regression + AR(1) residual is the biggest win so far |
-| 3 interpolation, Tianjin / Foshan | training mean 0.48 / 0.24 | **≈ 0.17 / 0.12** | almost all the remaining error is the site offset |
+| 1 | no site offset | 0.193 | offset helps |
+| 1 | + AR damping toward the 24 h mean | 0.191 | damping hurts, so it's off |
+| 1 | 60-min persistence instead of 10-min | 0.195 | the most recent level is best |
+| 1 | + mobile offset | 0.191 | not yet useful |
+| 2 | no humidity/temperature | 0.459 | the weather regression is the biggest single gain |
+| 2 | no temperature | 0.388 | temperature adds a little |
+| 2 | + 24 h/12 h harmonics | 0.413 | overfits one week, so it's off |
+| 2 | no AR(1) residual | 0.450 | the residual correction matters |
+| 2 | no site offset | 0.363 | **IDW offset slightly hurts in Tianjin**, so tune the shrinkage |
+| 3 | no site offset | 0.165 | same as above |
+| 3 | + mobile offset | 0.187 | hurts |
+
+Bugs the backtest caught (report section j, failure conditions):
+1. **Parked vehicles detected as static sites.** Foshan mobile #2's GPS jitter at its depot made ~70 fake "sites". Fixed by requiring ≥5% of the busiest coordinate's sample count. Short-term went 0.217 → 0.187, and 0.336 → 0.189 under noise.
+2. **Met extrapolation.** Tianjin static #5's temperature is nearly constant (std 0.7 °C), so the coefficient blew up at test sites whose temperature varies, giving predictions of ~370. Fixed by clipping future met features to the training range. Long-term went 1.05 → 0.41.
+3. **Sparse last bin under noise.** Fixed with a sample-weighted level over ≥1000 samples.
+
+Interpolation note: `make_task` blanks the window for *all* sensors, so all interpolation modes reduce to temporal interpolation (they're identical above). If the competition only blanks the test site, the `idw_now` mode should do better. Test that case too.
 
 ## 4. Where to push to win (ranked by expected gain per hour of work)
 
@@ -50,7 +73,8 @@ Prototype numbers from Python on the same split. The MATLAB numbers go in `docs/
    * Blend the forecast toward the weekly mean as the horizon grows. The AR(1) term already does this, but tune the decay rate on the backtest.
 2. **Site offset (the remaining error in all 3 tasks).**
    * Ordinary kriging / a GP over space for `o_s` instead of IDW (Lecture 9, spatio-temporal).
-   * Mobile data near the test location: the `use_mobile_offset` switch is already coded. Validate it, then tune the radius and calibration.
+   * Mobile data near the test location: the `use_mobile_offset` switch is already coded, but it currently *hurts* (see ablations). Fix the calibration or drop it.
+   * Tune `offset_shrink` (0 to 1). The full IDW offset helps in Foshan but slightly hurts in Tianjin.
    * Regress offsets on outside data (LandScan population, OSM road density near the site). This is also a strong idea for the "best presentation" award.
 3. **Short-term:** add the met regression residual (test_data has humidity and temperature for the next 3 h too) and tune the persistence window and damping on the backtest.
 4. **Interpolation:** use the spatial value at the same moment and the temporal neighbors together (a space-time GP or a blend weight learned on the backtest). For the case where all sensors are blank in the window, use cubic or GP interpolation with the diurnal shape.
