@@ -86,10 +86,11 @@ switch problem_type
     case 1
         o.bin_min     = 10;   % static sites binned at 10 min
         o.persist_bins = 1;   % persistence of the last 10 min
-        o.ar_damp     = true; % damp toward recent mean with fitted phi
+        o.ar_damp     = false;% AR damping toward 24 h mean: hurt in backtest
     case 2
         o.bin_min     = 60;
-        o.use_met     = true; % humidity/temperature regression
+        o.use_met     = true; % humidity regression
+        o.use_tmp     = true; % ...plus temperature
         o.use_diurnal = true; % 24 h and 12 h harmonics
         o.use_ar_resid = true;
         o.ridge       = 1e-3;
@@ -328,6 +329,11 @@ hf = tgt.hmd; tf = tgt.tmp;
 hf(~isfinite(hf)) = mean(Hc(v));
 tf(~isfinite(tf)) = mean(Tc(v));
 Xf = design(tgt.t, hf, tf, opts);
+% Never extrapolate the met features: the static enclosures' temperature can
+% be almost constant during training (tiny std -> huge coefficient), while the
+% test site's sensor varies. Clip each feature to its training range.
+lo = min(Xtr, [], 1); hi = max(Xtr, [], 1);
+Xf = min(max(Xf, lo), hi);
 Zf = [ones(numel(tgt.t), 1), (Xf(:, 2:end) - mu) ./ sd];
 L = Zf * beta;
 
@@ -340,11 +346,13 @@ if opts.use_ar_resid && numel(res) > 5
 else
     sL = repmat(std(res), size(hz));
 end
+L = min(max(L, min(ytr)), max(ytr));          % stay inside the observed range
 end
 
 function X = design(t, h, tm, opts)
 X = ones(numel(t), 1);
-if opts.use_met, X = [X, h(:), tm(:)]; end
+if opts.use_met, X = [X, h(:)]; end
+if opts.use_met && opts.use_tmp, X = [X, tm(:)]; end
 if opts.use_diurnal
     w = 2 * pi * mod(t(:), 1);                 % fraction of day
     X = [X, sin(w), cos(w), sin(2 * w), cos(2 * w)];
