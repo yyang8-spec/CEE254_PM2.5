@@ -46,7 +46,9 @@ V = {
   'base: daily profile',           'daily_profile'
 };
 
-for nf = NOISE
+RES = nan(size(V,1), numel(NOISE));          % pooled NRMSE: variant x noise
+for q = 1:numel(NOISE)
+    nf = NOISE(q);
     se = zeros(size(V,1), 1); ss = 0; n = 0;
     for t0 = starts
         for h = st
@@ -62,9 +64,14 @@ for nf = NOISE
     end
     fprintf('\n=== short-term, Foshan, noise %.1f sigma  [%d test values] ===\n', nf, n);
     for v = 1:size(V,1)
-        fprintf('  %-32s NRMSE = %.4f\n', V{v,1}, sqrt(se(v)/n) / sqrt(ss/n));
+        RES(v, q) = sqrt(se(v)/n) / sqrt(ss/n);
+        fprintf('  %-32s NRMSE = %.4f\n', V{v,1}, RES(v, q));
     end
 end
+labels = V(:,1); nTest = n; %#ok<NASGU>
+out = fullfile(ROOT, 'short_term', sprintf('validate_results_%s.mat', strrep(sprintf('%g_', NOISE), '.', 'p')));
+save(out, 'RES', 'labels', 'NOISE', 'nTest', 'QUICK', '-v7');
+fprintf('\nsaved %s  (plot with short_term/st_plot_validation.m)\n', out);
 
 % ---- missing-data check: no static data in the last 3 h ------------------
 stPos = zeros(numel(st), 2);

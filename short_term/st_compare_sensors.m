@@ -56,3 +56,31 @@ for k = 1:numel(R)
     for q = 1:3, fprintf('  noise %s -> %g', labs{q}, R{k}.results.(keys{q}).tau); end
     fprintf('\n');
 end
+
+% ---- figure: noise vs lag trade-off of the smoothing window ---------------
+if ~exist('MAKE_FIGS', 'var') || MAKE_FIGS
+    names = {'B2 persist last 10 min', 'S1 EWMA tau 5 min', 'S2 EWMA tau 10 min', ...
+             'S3 EWMA tau 20 min', 'S4 EWMA tau 30 min'};
+    xt = [10 5 10 20 30];  % only used for labels
+    T = zeros(numel(names), 3);
+    for m = 1:numel(names)
+        mi = find(strcmp(mdl, names{m}));
+        for q = 1:3
+            se = 0; ss = 0;
+            for k = 1:numel(R)
+                e = R{k}.results.(keys{q}).errs(:,:,mi); t = R{k}.results.(keys{q}).truth;
+                sel = all(isfinite(e),2) & all(isfinite(t),2) & ~R{k}.isVal(:);
+                se = se + sum(sum(e(sel,:).^2)); ss = ss + sum(sum(t(sel,:).^2));
+            end
+            T(m, q) = sqrt(se / ss);
+        end
+    end
+    f = figure('Color', 'w', 'Position', [80 80 760 420]);
+    plot([0 0.5 1], T', '-o', 'LineWidth', 1.5); grid on;
+    set(gca, 'XTick', [0 0.5 1]); xlabel('noise added to training PM2.5 (x sigma)');
+    ylabel('test NRMSE, pooled over 5 sensors');
+    legend({'last 10-min bin', 'EWMA \tau = 5 min', 'EWMA \tau = 10 min', 'EWMA \tau = 20 min', 'EWMA \tau = 30 min'}, 'Location', 'northwest');
+    title('Single sensor: smoothing trades noise for lag');
+    print(f, fullfile(ROOT_CMP, 'figures', 'st_smoothing_vs_noise.png'), '-dpng', '-r150');
+    fprintf('saved figures/st_smoothing_vs_noise.png\n');
+end

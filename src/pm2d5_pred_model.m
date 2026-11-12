@@ -24,6 +24,20 @@ function [pred_pm2d5, pred_std] = pm2d5_pred_model(train_data, test_data, proble
 %   Everything is plain MATLAB (no toolboxes) and also runs in GNU Octave.
 
 if nargin < 4 || isempty(opts), opts = struct(); end
+
+% Short-term (problem_type 1) is its own function, src/pm_short_term.m
+% (owner: short-term lead). It is self-contained - parsing, cleaning,
+% static/mobile separation, level + offset, fallbacks - and is validated by
+% short_term/st_validate.m. Set opts.legacy_short = true to use the older
+% in-file version below instead (kept only for comparison).
+if problem_type == 1 && ~(isfield(opts, 'legacy_short') && opts.legacy_short)
+    if exist('pm_short_term', 'file') ~= 2      % until it moves into src/
+        addpath(fullfile(fileparts(mfilename('fullpath')), '..', 'short_term'));
+    end
+    [pred_pm2d5, pred_std] = pm_short_term(train_data, test_data, opts);
+    return
+end
+
 opts = fill_opts(opts, default_opts(problem_type));
 
 % ---------- 1. parse and clean inputs ---------------------------------------
