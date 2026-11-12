@@ -181,8 +181,12 @@ for k = 1:size(locs, 1)
         off = 0; off_sd = 0;
     end
     % 7b. forecast = level held flat (persistence) + offset
-    hz = max(te.t(rows) - tRef, 0) * 24;           % horizon in hours
     pred(rows) = max(level + off, opts.min_pred);
+    % 7c. uncertainty. The target is the MEAN over [t, t + 1 h), centred
+    %     30 min after t, so the persistence error is measured at the middle
+    %     of the target hour, not at t itself. (Using t understated the
+    %     h = 1 sd: 4.1 vs an actual RMSE of 6.5; see st_uncertainty.m.)
+    hz = max(te.t(rows) - tRef, 0) * 24 + 0.5;     % hours to mid-target
     pred_sd(rows) = sqrt(persist_sd(Lv, opts.bin_min, hz).^2 + off_sd^2);
 end
 
