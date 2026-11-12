@@ -86,7 +86,11 @@ o.mobile_min_hours  = 3;
 switch problem_type
     case 1
         o.bin_min     = 10;   % static sites binned at 10 min
-        o.persist_bins = 1;   % persistence of the last 10 min...
+        o.level_method = 'ewma'; % 'ewma' (default) | 'bins'
+        o.ewma_tau_min = 10;  % EWMA time constant (min). Single-sensor study
+                              % (short_term/README.md): tau = 10 is the most
+                              % noise-robust (0.1548 at 1 sigma, 5 sensors)
+        o.persist_bins = 1;   % 'bins': persistence of the last 10 min...
         o.min_samples = 1000; % ...or longer, until >= this many raw samples
         o.ar_damp     = false;% AR damping toward 24 h mean: hurt in backtest
     case 2
@@ -222,6 +226,15 @@ if ~any(keep), keep(:) = true; end
 S = S(:, keep); H = H(:, keep); T = T(:, keep); N = N(:, keep);
 lat = lat(keep); lon = lon(keep);
 
+% raw samples of the last 3 h per kept site (for the short-term EWMA level)
+kk = siteKeys(keep); tEnd = max(tr.t(isStaticRow));
+site.rt = cell(1, numel(kk)); site.rp = site.rt;
+for j = 1:numel(kk)
+    idx = (g == kk(j)) & tr.t >= tEnd - 3/24;
+    site.rt{j} = tr.t(idx); site.rp{j} = tr.pm(idx);
+end
+site.tEnd = tEnd;
+
 % decompose S = city level + site offset (2 sweeps handle missing sites)
 o = zeros(1, size(S, 2));
 for it = 1:3
@@ -306,6 +319,24 @@ end
 % =============================================================================
 function [L, sL] = level_short(tgt, site, opts)
 Lc = site.L; v = find(isfinite(Lc));
+if strcmp(opts.level_method, 'ewma')
+    % exponentially weighted mean of every raw static sample of the last 3 h,
+    % offset-corrected per site: w = exp(-age / tau). Pools all sites, so the
+    % effective sample count is high and the injected noise averages out.
+    num = 0; den = 0;
+    for j = 1:numel(site.rt)
+        if isempty(site.rt{j}), continue; end
+        w = exp(-(site.tEnd - site.rt{j}) * 1440 / opts.ewma_tau_min);
+        num = num + sum(w .* (site.rp{j} - site.offset(j))); den = den + sum(w);
+    end
+    if den > 0
+        last = num / den;
+        hz = max(tgt.t - site.tEnd, 0) * 24;
+        L = repmat(last, size(tgt.t));
+        sL = persistence_sd(Lc(v), opts.bin_min, hz);
+        return
+    end                                        % no recent data: fall back to bins
+end
 % Sample-weighted level over the most recent bins: take at least
 % persist_bins bins and keep going back until min_samples raw samples are
 % covered. A single sparse bin at a data edge is otherwise very noise-prone.
