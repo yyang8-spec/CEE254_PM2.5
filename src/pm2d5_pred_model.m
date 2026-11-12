@@ -75,6 +75,7 @@ o.min_pred        = 1;      % PM2.5 sensors floor at 1
 o.spike_mad_k     = 12;     % remove PM > median + k*1.4826*MAD (gross spikes)
 o.static_cover    = 0.5;    % a coordinate is "static" if it has data in >=50% of hours
 o.static_max_spd  = 2;      % ...and its median speed is below this
+o.static_min_frac = 0.05;   % ...and >= 5% of the busiest coordinate's samples (parked: <1%)
 o.min_site_corr   = 0.7;    % drop static sites poorly correlated with the rest
 o.idw_power       = 2;
 o.idw_min_km      = 0.2;
@@ -169,7 +170,11 @@ nHours = max(th) - min(th) + 1;
 key = round([tr.lat tr.lon] * 1e5);
 [ukey, ~, g] = unique(key, 'rows');
 cnt = accumarray(g, 1);
-cand = find(cnt > 200);
+% A real static sensor logs ~1200 samples/h at one exact coordinate. A parked
+% vehicle's GPS jitters, spreading its samples over dozens of coordinates
+% (Foshan mobile #2 at its depot: ~70 keys x ~300 samples, >50% hourly cover).
+% So also require a sample count comparable to the busiest coordinate.
+cand = find(cnt > 200 & cnt >= opts.static_min_frac * max(cnt));
 isSite = false(size(ukey, 1), 1);
 for c = cand'
     idx = (g == c);
