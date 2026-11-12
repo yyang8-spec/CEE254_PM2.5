@@ -1,4 +1,32 @@
-# Short-term prediction: single-sensor study
+# Short-term prediction
+
+## The function: `pm_short_term.m` (problem_type 1)
+
+```matlab
+[pred, pred_sd, info] = pm_short_term(train_data, test_data);   % opts optional
+```
+
+To validate it the way the competition scores it, run `run('short_term/st_validate.m')`. That does leave-one-sensor-out, a rolling origin every 3 h, and 585 test values per noise level.
+
+| | Noise 0 | 0.5σ | 1.0σ |
+|---|---|---|---|
+| **pm_short_term (EWMA τ 5 + IDW offset)** | **0.1856** | **0.1862** | **0.1873** |
+| abl: τ = 10 min | 0.1874 | 0.1877 | 0.1884 |
+| abl: τ = 20 min | 0.1908 | 0.1910 | 0.1913 |
+| abl: no site offset | 0.1918 | 0.1924 | 0.1935 |
+| abl: keep faulty sites (none in Foshan) | 0.1856 | 0.1862 | 0.1873 |
+| **abl: no parked-vehicle rule** | 0.2165 | **0.6052** | **0.6098** |
+| base: nearest-sensor persistence | 0.2159 | 0.2152 | 0.2148 |
+| base: training mean | 0.5266 | 0.5266 | 0.5266 |
+| base: daily profile | 0.6006 | 0.6006 | 0.6005 |
+
+Missing-data check: with static data removed from the last 3 h, the calibrated-mobile fallback gives 0.238, against 0.181 with full data on the same subset. That is worse than normal operation but bounded. Before the stale-sample fix, this case gave 0.485.
+
+The parked-vehicle rule is the single most important cleaning step under noise. Without it, the fake "static sites" from a parked vehicle's GPS jitter triple the error.
+
+Tested in GNU Octave 8.4. The code uses base MATLAB only, but it has not been run in MATLAB yet.
+
+# Single-sensor study
 
 `st_single_sensor.m` runs three stages on **Foshan static #3**: cleaning, correlation, models. Set `SENSOR` to use another one. Run from the repo root:
 
