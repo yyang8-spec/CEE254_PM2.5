@@ -87,9 +87,12 @@ switch problem_type
     case 1
         o.bin_min     = 10;   % static sites binned at 10 min
         o.level_method = 'ewma'; % 'ewma' (default) | 'bins'
-        o.ewma_tau_min = 10;  % EWMA time constant (min). Single-sensor study
-                              % (short_term/README.md): tau = 10 is the most
-                              % noise-robust (0.1548 at 1 sigma, 5 sensors)
+        o.ewma_tau_min = 5;   % EWMA time constant (min). Leave-one-sensor-out
+                              % backtest, NRMSE at noise 0 / 0.5 / 1.0 sigma:
+                              % tau 5: .1856/.1862/.1873  tau 10: .1874/.1877/.1884
+                              % tau 20: .1908/.1910/.1913  10-min bin: .1873/.1879/.1888
+                              % (pooling 4 sites -> 4x samples, so a shorter tau
+                              % than the single-sensor optimum of 10 min wins)
         o.persist_bins = 1;   % 'bins': persistence of the last 10 min...
         o.min_samples = 1000; % ...or longer, until >= this many raw samples
         o.ar_damp     = false;% AR damping toward 24 h mean: hurt in backtest

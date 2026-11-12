@@ -86,4 +86,15 @@ Test NRMSE pooled over the 5 Foshan static sensors (59 test origins each):
 
 1. **Use the other sensors.** The multi-sensor version in `src/pm2d5_pred_model.m` scores 0.187 against 0.216 for the nearest sensor (leave-one-out). The remaining gain is spatial rather than temporal.
 2. ~~Exponential smoothing~~ and ~~all 5 sensors~~: done (above).
-3. Put EWMA τ = 10 min into `src/pm2d5_pred_model.m` for problem type 1 and confirm it in `run_validation`.
+3. ~~Put EWMA into the competition function~~: done. In the leave-one-sensor-out backtest (`run_validation`, 585 test values), **τ = 5 min** wins at every noise level:
+
+   | Level estimate | Noise 0 | 0.5σ | 1.0σ |
+   |---|---|---|---|
+   | **EWMA τ = 5 min (default)** | **0.1856** | **0.1862** | **0.1873** |
+   | EWMA τ = 10 min | 0.1874 | 0.1877 | 0.1884 |
+   | EWMA τ = 20 min | 0.1908 | 0.1910 | 0.1913 |
+   | Old 10-min bin | 0.1873 | 0.1879 | 0.1888 |
+   | Nearest-sensor baseline | 0.2159 | 0.2152 | 0.2148 |
+   | Without the site offset (τ = 10) | 0.1934 | 0.1938 | 0.1945 |
+
+   The optimum is shorter than in the single-sensor study (10 min) because the competition function pools 4 sensors, so it has 4× the samples per minute and the noise is already averaged down.
