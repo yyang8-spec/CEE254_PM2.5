@@ -24,6 +24,10 @@ function [pred_pm2d5, pred_std] = pm2d5_pred_model(train_data, test_data, proble
 %   Everything is plain MATLAB (no toolboxes) and also runs in GNU Octave.
 
 if nargin < 4 || isempty(opts), opts = struct(); end
+% The 11/16 competition files are MATLAB tables (time as datetime); accept
+% tables as well as the P x 7 / M x 6 matrices described in the handout.
+train_data = table_to_matrix(train_data, true);
+test_data  = table_to_matrix(test_data, false);
 
 % Short-term (problem_type 1) is its own function, src/pm_short_term.m
 % (owner: short-term lead). It is self-contained - parsing, cleaning,
@@ -506,4 +510,13 @@ function td = dewpoint(T, RH)
 a = 17.62; b = 243.12;
 g = log(min(max(RH, 1), 100) / 100) + a * T ./ (b + T);
 td = b * g ./ (a - g);
+end
+
+function X = table_to_matrix(X, isTrain)
+% table [time hmd spd tmp (pm2d5) lat lon] -> [datenum hmd tmp spd (pm2d5) lat lon]
+if ~isa(X, 'table'), return; end
+t = X.time;
+if isdatetime(t), t.TimeZone = ''; t = datenum(t); end
+if isTrain, X = [t, X.hmd, X.tmp, X.spd, X.pm2d5, X.lat, X.lon];
+else,       X = [t, X.hmd, X.tmp, X.spd, X.lat, X.lon]; end
 end

@@ -42,6 +42,9 @@ function [pred, pred_sd, info] = pm_short_term(train_data, test_data, opts)
 
 if nargin < 3 || isempty(opts), opts = struct(); end
 opts = fill_defaults(opts);
+% The 11/16 competition files are MATLAB tables, not matrices: accept both.
+train_data = table_to_matrix(train_data, true);
+test_data  = table_to_matrix(test_data, false);
 
 %% 1. PARSE ---------------------------------------------------------------
 % The competition gives plain matrices. Two things are not guaranteed:
@@ -186,7 +189,14 @@ for k = 1:size(locs, 1)
     %     30 min after t, so the persistence error is measured at the middle
     %     of the target hour, not at t itself. (Using t understated the
     %     h = 1 sd: 4.1 vs an actual RMSE of 6.5; see st_uncertainty.m.)
-    hz = max(te.t(rows) - tRef, 0) * 24 + 0.5;     % hours to mid-target
+    %     Label convention: in our validation a row stamped t is the mean of
+    %     [t, t+1h); in the 11/16 competition files it is the mean of
+    %     [t-1h, t) (checked: the test humidity equals the hour BEFORE the
+    %     stamp). Detect it: if the first stamp is ~1 h after the end of the
+    %     training data, the stamps mark hour ends.
+    lead = (min(te.t(rows)) - tRef) * 24;
+    if lead > 0.75, mid = -0.5; else, mid = 0.5; end
+    hz = max((te.t(rows) - tRef) * 24 + mid, 0.1);  % hours to mid-target
     pred_sd(rows) = sqrt(persist_sd(Lv, opts.bin_min, hz).^2 + off_sd^2);
 end
 
@@ -287,6 +297,20 @@ c3 = X(:, 3); c4 = X(:, 4);
 if medn(c3) < medn(c4), s.tmp = c4; s.spd = c3; else, s.tmp = c3; s.spd = c4; end
 if isTrain, s.pm = X(:, 5); s.lat = X(:, 6); s.lon = X(:, 7);
 else, s.lat = X(:, 5); s.lon = X(:, 6); end
+end
+
+function X = table_to_matrix(X, isTrain)
+% MATLAB table with variables time (datetime), hmd, spd, tmp, [pm2d5], lat,
+% lon -> numeric matrix [datenum hmd tmp spd (pm2d5) lat lon]. Matrices pass
+% through unchanged (columns 3/4 are detected later in parse_matrix).
+if ~isa(X, 'table'), return; end
+t = X.time;
+if isdatetime(t), t.TimeZone = ''; t = datenum(t); end
+if isTrain
+    X = [t, X.hmd, X.tmp, X.spd, X.pm2d5, X.lat, X.lon];
+else
+    X = [t, X.hmd, X.tmp, X.spd, X.lat, X.lon];
+end
 end
 
 function s = subset(s, ok)
