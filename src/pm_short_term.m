@@ -164,8 +164,11 @@ pred = nan(numel(te.t), 1); pred_sd = pred;
 info.level = level; info.level_source = src;
 
 % uncertainty of the level: RMS change of the 10-min city level over the
-% same horizon in the training window (empirical persistence error)
-Lv = L(isfinite(L));
+% same horizon in the training window (empirical persistence error).
+% L stays on its regular 10-min grid WITH its NaN bins, so that a lag of k
+% bins always means k*10 minutes of real time (dropping empty bins first
+% would join the two sides of a gap and mis-state the horizon).
+Lv = L;
 
 [locs, ~, locId] = unique(round([te.lat te.lon] * 1e5) / 1e5, 'rows');
 for k = 1:size(locs, 1)
@@ -256,10 +259,18 @@ else, level = mean(tr.pm); src = 'training mean (fallback)'; end
 end
 
 function [level, ok] = static_ewma(tr, g, siteKeys, o, tRef, opts)
+% opts.level_method = 'ewma' (default): exponentially weighted mean of the
+% offset-corrected samples of the last 3 h.  'last' (ablation: smoothing
+% removed): the single most recent offset-corrected sample of each site.
 num = 0; den = 0;
 for j = 1:numel(siteKeys)
     idx = (g == siteKeys(j)) & tr.t >= tRef - 3/24 & tr.t <= tRef;
     if ~any(idx), continue; end
+    if strcmp(opts.level_method, 'last')
+        tj = tr.t(idx); pj = tr.pm(idx); [~, k] = max(tj);
+        num = num + (pj(k) - o(j)); den = den + 1;
+        continue
+    end
     w = exp(-(tRef - tr.t(idx)) * 1440 / opts.tau_min);
     num = num + sum(w .* (tr.pm(idx) - o(j)));   % offset-corrected samples
     den = den + sum(w);
@@ -269,7 +280,9 @@ end
 
 %% ============================== DEFAULTS =================================
 function o = fill_defaults(o)
-d.tau_min         = 5;     % EWMA time constant (minutes), chosen on backtest
+d.tau_min         = 5;     % EWMA time constant (minutes), chosen on the
+                           % development half of the backtest (st_validate.m)
+d.level_method    = 'ewma';% 'ewma' | 'last' (ablation: no smoothing)
 d.bin_min         = 10;    % bin size for offsets / site checks (minutes)
 d.spike_k         = 12;    % spike threshold in robust sd
 d.static_cover    = 0.5;   % static site: data in >= 50% of hours
@@ -319,12 +332,19 @@ for i = 1:numel(f), s.(f{i}) = s.(f{i})(ok); end
 end
 
 function sd = persist_sd(Lv, binMin, hz)
-% empirical RMS of the level change over each horizon in the training data
+% empirical RMS of the level change over each horizon in the training data.
+% Lv is on a regular time grid (NaN = empty bin); only pairs exactly `lag`
+% bins apart with BOTH ends observed are used.
 sd = zeros(size(hz));
 for i = 1:numel(hz)
     lag = max(1, round(hz(i) * 60 / binMin));
-    if lag < numel(Lv), sd(i) = sqrt(mean((Lv(1+lag:end) - Lv(1:end-lag)).^2));
-    else, sd(i) = std(Lv); end
+    if lag < numel(Lv)
+        d = Lv(1+lag:end) - Lv(1:end-lag); d = d(isfinite(d));
+    else
+        d = [];
+    end
+    if numel(d) >= 5, sd(i) = sqrt(mean(d.^2));
+    else, v = Lv(isfinite(Lv)); sd(i) = std(v); end
 end
 end
 
