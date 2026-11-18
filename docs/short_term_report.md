@@ -21,7 +21,7 @@ Draft text and tables for the short-term part of the final report and slides. Ev
 * 5 static and 8 mobile devices, 3-s sampling, 2,177,577 rows.
 * No NaN values and no duplicate timestamps.
 * Static sensors have no gaps longer than 75 s.
-* Mobile sensors are off at night: 188 gaps longer than 1 h, the longest 16.9 h.
+* Many long mobile gaps occur overnight: 188 gaps longer than 1 h, the longest 16.9 h. The cause (vehicles parked, sensors switched off, or data not transmitted) is not confirmed.
 * Static sensors track each other closely: hourly correlation 0.93–0.98. The spread between sites in a given hour is about 5 µg/m³, against about 19 µg/m³ variation over time.
 * The mobile sensors read about 10 µg/m³ above the static ones (means 58–69 vs 43–55).
 * Figure: `figures/st_s3_cleaning.png` (raw 3-s data, the cleaned 10-min series, humidity and temperature for static #3).
@@ -37,8 +37,8 @@ Draft text and tables for the short-term part of the final report and slides. Ev
 | Static vs mobile | A coordinate is static if it has data in ≥ 50% of hours, median speed < 2, and ≥ 5% of the busiest coordinate's samples | 4–5 sites found per window | There is no device ID in the matrix |
 | Parked-vehicle rule | (the 5% rule above) | Without it, a parked vehicle's GPS jitter creates ~70 fake "sites": NRMSE 0.2165 / 0.6052 / 0.6098 instead of 0.1856 / 0.1862 / 0.1873 (noise 0 / 0.5 / 1.0σ) | The most important cleaning step under noise |
 | Faulty sites | Drop a site whose correlation with the others' median is < 0.7 | 0 in Foshan (sites are 0.93–0.98); catches Tianjin static #6 (0.54) | Robustness to a broken sensor |
-| Binning | 10-min means per static site (~200 samples each) | Noise reduced about 14×: about 1.8 µg/m³ per site-bin at 1.0σ | This is why the noise tests barely change the score |
-| Level smoothing | EWMA of the raw static samples, τ = 5 min | see section h | Trades noise against lag |
+| Binning | 10-min means per static site (~200 samples each) | Noise reduced about 14×: about 1.8 µg/m³ per site-bin at 1.0σ | Used to check the sites, estimate the site offsets and the uncertainty. **The current level is not computed from these bins** (next row) |
+| Level smoothing | EWMA applied directly to the raw 3-s static samples, τ = 5 min | see section h | Trades noise against lag |
 
 Single-sensor cleaning of static #3 (`st_single_sensor.m`): 2 Hampel spikes, 0 flat-lines of 10 min or more, 8 gaps longer than 6 s (longest 73 s), and 1 sparse 10-min bin. 99.999% of samples kept.
 
@@ -52,7 +52,7 @@ Hourly city level, Foshan (`analysis/variable_correlation.m`; figure `figures/co
 | PM 3 h ago | 0.816 | 0.59–0.82 | Captured by persistence |
 | PM 24 h ago | 0.029 | −0.04 / −0.68 | Drop |
 | Temperature | 0.554 | flips sign day to day (static #3: −0.89 to +0.88) | Drop |
-| Humidity | −0.222 | partial correlation given temperature = **0.011** | Drop: its correlation only reflects temperature |
+| Humidity | −0.222 | partial correlation given temperature = **0.011** | Drop: adds little beyond temperature in a linear model. This does not rule out a nonlinear or joint effect |
 | Dew point | 0.348 | unstable | Drop |
 | Hour of day | η² = 0.068 | — | Drop |
 | Vehicle speed (mobile) | median PM 51.0–52.0 in every speed bin | — | Drop; test sites are fixed |
@@ -65,13 +65,13 @@ Hourly city level, Foshan (`analysis/variable_correlation.m`; figure `figures/co
 | Dew-point change | −0.16 to −0.17 |
 | Last-hour trend | +0.10 at h = 1, 0.00 at h = 3 |
 
-Nothing exceeds |r| ≈ 0.28. This predicts that regression on the change will add little, and section f confirms it.
+None of the examined features has a linear correlation above |r| ≈ 0.28 with the change. A weak linear association does not rule out nonlinear or joint predictive value, but it suggests that regression on the change will add little. Section f tests this directly.
 
 ## f. Models and training
 
-**Final model:** PM(site, t) = L(t) + o(site), forecast held flat over h = 1..3.
+**Final model: multi-sensor persistence with exponential smoothing and a spatial offset correction.** PM(site, t) = L(t) + o(site), forecast held flat over h = 1..3. Linear and ridge regression were compared and not adopted (below).
 
-1. **Train** on the 3-day window. Alternate L(t) = mean over sites of (S − o_s) and o_s = mean over time of (S − L), centred to sum to 0. The site offsets o_s are the learned parameters.
+1. **Train** on the 3-day window, using the **10-min bin means** of each static site (S). Alternate L(t) = mean over sites of (S − o_s) and o_s = mean over time of (S − L), centred to sum to 0. The site offsets o_s are the learned parameters.
 2. **Level at the origin:** an exponentially weighted mean of every offset-corrected static sample in the last 3 h, w = exp(−age/τ) with τ = 5 min. τ was selected on the backtest from {5, 10, 20 min, last 10-min bin}.
 3. **Offset at the test site:** inverse-distance weighting (power 2, minimum distance 0.2 km) of the o_s.
 4. **Fallbacks:**
@@ -150,12 +150,12 @@ Error grows with horizon (0.138 / 0.172 / 0.208 for h = 1/2/3) only because the 
 | h = 3 | 9.20 | 9.75 | 81.5% | 91.8% |
 | All | 7.88 | 7.38 | 74.5% | 90.8% |
 
-The ±1 sd band is about right. The 95% band under-covers (91%) because errors are heavy-tailed: pollution events produce a few large misses.
+**The intervals are not well calibrated.** The 95% intervals under-cover (90.8% instead of 95%), most at h = 1 (88.2%), because the errors are heavy-tailed: pollution events produce a few large misses. The ±1 sd band is close to nominal overall (74.5% vs 68%), but it under-covers at h = 1 and over-covers at h = 2–3.
 
 **Failure conditions**
 
-1. **Sensor calibration offsets.** The static sites differ by up to ±7 µg/m³ (s2 −6.8, s3 +7.5), but mobile sensors passing within 200 m read close to the city average there. The mobile-minus-static difference at the same minute is +13.9 at s2 and +3.5 at s3. So the offsets are mostly sensor calibration, not real spatial differences in air quality. No method based on other sensors can predict a test sensor's own calibration: holding out s2 gives NRMSE 0.256, against 0.176 with its true offset.
-2. **Sudden pollution events.** Persistence cannot anticipate a rise or fall within the next 3 h, and no available feature predicts it (|r| < 0.3). Errors peak at h = 3 and in events such as 14 Oct 06:00–12:00.
+1. **Site-specific offsets.** The static sites differ by up to ±7 µg/m³ (s2 −6.8, s3 +7.5), while mobile sensors passing within 200 m read close to the city average there. The mobile-minus-static difference at the same minute is +13.9 at s2 and +3.5 at s3. This suggests the offsets **may partly reflect calibration differences between sensors**, but device, location (e.g. mounting height, distance to the road) and sampling conditions remain confounded. To the extent that an offset is specific to the test sensor, methods based on the other sensors cannot recover it: holding out s2 gives NRMSE 0.256, against 0.176 with its true offset.
+2. **Sudden pollution events.** Persistence cannot anticipate a rise or fall within the next 3 h. The examined features showed only weak linear associations with the change (|r| < 0.3), and the regressions tested did not improve on the test period. Errors peak at h = 3 and in events such as 14 Oct 06:00–12:00.
 3. **Missing static data at the forecast time.** The mobile fallback raises NRMSE from 0.181 to 0.238 (missing-data check in `st_validate.m`). Before the stale-sample fix, this case gave 0.485.
 4. **Extrapolation in space.** IDW cannot extrapolate beyond the sensors. A test site at the edge of the area, like s2, inherits a level that is too high.
 5. **Extrapolation in PM range.** The static sensors in this week stay below 180 µg/m³ (static maxima 130–177 µg/m³). Persistence itself has no range limit, but the site offsets are additive and estimated at typical levels. If a sensor's error scales with concentration, the offset will be wrong during an extreme event outside the training range.
@@ -165,7 +165,7 @@ The ±1 sd band is about right. The 95% band under-covers (91%) because errors a
 * **Data collection:**
   * Co-calibrate all sensors side by side before deployment, which removes failure condition 1.
   * Log a device ID in the data stream.
-  * Keep mobile sensors running at night.
+  * Record why mobile data stops overnight, and keep overnight coverage if possible.
 * **Analysis:**
   * Kriging or a GP for the offsets, with calibrated uncertainty.
   * A space-time model (Lecture 9).
