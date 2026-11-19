@@ -143,7 +143,9 @@ for k = 1:numel(chk)
         if any(strcmp(chk{k}, {'humidity','temperature','dew_point','hour_sin','hour_cos'}))
             xx = [x(1+h:end) - x(1:end-h); nan(h,1)];    % change in met over the horizon
         else
-            xx = x;                                       % trend known at the origin
+            % trend known at the origin t: y(t) - y(t-1). d_pm_1h(t) is
+            % y(t-1) - y(t-2) (one hour stale), so shift it by one hour.
+            xx = [x(2:end); NaN];
         end
         s = [s sprintf('  h=%d: %6.3f', h, pearson(dy, xx))]; %#ok<AGROW>
     end

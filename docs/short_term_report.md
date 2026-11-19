@@ -57,15 +57,17 @@ Hourly city level, Foshan (`analysis/variable_correlation.m`; figure `figures/co
 | Hour of day | η² = 0.068 | — | Drop |
 | Vehicle speed (mobile) | median PM 51.0–52.0 in every speed bin | — | Drop; test sites are fixed |
 
-**The forecasting question** is whether anything predicts the 1–3 h change. Correlation with y(t+h) − y(t) for static #3 (`st_single_sensor.m`; figure `figures/st_s3_correlation.png`):
+**The forecasting question** is whether anything predicts the 1–3 h change. Correlation with y(t+h) − y(t), hourly city level, Foshan (`short_term/st_demo.m`, section 2):
 
-| Feature | Correlation with the change |
-|---|---|
-| Hour of day (cos) | −0.20 to −0.28 (strongest) |
-| Dew-point change | −0.16 to −0.17 |
-| Last-hour trend | +0.10 at h = 1, 0.00 at h = 3 |
+| Feature known at the origin t | h = 1 | h = 2 | h = 3 |
+|---|---|---|---|
+| Most recent 1-h trend, y(t) − y(t−1) | **0.440** | 0.326 | 0.249 |
+| Temperature change over the horizon | −0.062 | −0.053 | −0.032 |
+| Hour of day (cos) | −0.031 | 0.002 | 0.042 |
 
-None of the examined features has a linear correlation above |r| ≈ 0.28 with the change. A weak linear association does not rule out nonlinear or joint predictive value, but it suggests that regression on the change will add little. Section f tests this directly.
+The most recent trend is **moderately** related to the next change (short-term momentum); the weather and time-of-day features are not. *(Correction: an earlier version of this table, from `st_single_sensor.m`, used a trend lagged by one extra hour and reported |r| ≤ 0.28 for all features. That has been fixed in the code.)*
+
+A moderate in-sample correlation does not guarantee an out-of-sample gain, so section f tests it directly. The ridge models include aligned trend features (last 10 min minus the last-hour mean; EWMA 5 vs 30 and 5 vs 120 min). **They did not beat persistence on the held-out test periods.** A likely reason is that momentum reverses sharply after pollution peaks (e.g. 14 Oct), which costs a trend model more than it gains during the rise.
 
 ## f. Models and training
 
@@ -175,7 +177,7 @@ Error grows with horizon (0.138 / 0.172 / 0.208 for h = 1/2/3) only because the 
 **Failure conditions**
 
 1. **Site-specific offsets.** The static sites differ by up to ±7 µg/m³ (s2 −6.8, s3 +7.5), while mobile sensors passing within 200 m read close to the city average there. The mobile-minus-static difference at the same minute is +13.9 at s2 and +3.5 at s3. This suggests the offsets **may partly reflect calibration differences between sensors**, but device, location (e.g. mounting height, distance to the road) and sampling conditions remain confounded. To the extent that an offset is specific to the test sensor, methods based on the other sensors cannot recover it: holding out s2 gives NRMSE 0.256, against 0.176 with its true offset.
-2. **Sudden pollution events.** Persistence cannot anticipate a rise or fall within the next 3 h. The examined features showed only weak linear associations with the change (|r| < 0.3), and the regressions tested did not improve on the test period. Errors peak at h = 3 and in events such as 14 Oct 06:00–12:00.
+2. **Sudden pollution events.** Persistence cannot anticipate a rise or fall within the next 3 h. The recent trend is moderately correlated with the next change (r ≈ 0.44 at h = 1), but trend-based regressions did not improve on the held-out test period, and the other features showed only weak linear associations. Errors peak at h = 3 and in events such as 14 Oct 06:00–12:00.
 3. **Missing static data at the forecast time.** The mobile fallback raises NRMSE from 0.182 to 0.241 (missing-data check in `st_validate.m`, every 4th origin, noise 0). Before the stale-sample fix, this case gave 0.485.
 4. **Extrapolation in space.** IDW cannot extrapolate beyond the sensors. A test site at the edge of the area, like s2, inherits a level that is too high.
 5. **Extrapolation in PM range.** The static sensors in this week stay below 180 µg/m³ (static maxima 130–177 µg/m³). Persistence itself has no range limit, but the site offsets are additive and estimated at typical levels. If a sensor's error scales with concentration, the offset will be wrong during an extreme event outside the training range.
