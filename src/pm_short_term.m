@@ -25,13 +25,14 @@ function [pred, pred_sd, info] = pm_short_term(train_data, test_data, opts)
 %             (persistence), held flat for h = 1, 2, 3 h.
 %
 % WHY PERSISTENCE AND NOT REGRESSION (validated, see short_term/README.md)
-%   * PM 1 h ago correlates 0.96 with PM now, but nothing correlates with the
-%     1-3 h CHANGE by more than |r| ~ 0.28 (hour of day, dew-point change,
-%     recent trend, other sensors' trends).
+%   * PM 1 h ago correlates 0.96 with PM now. Of the features tested, only
+%     the most recent 1-h trend is moderately related to the 1-3 h CHANGE
+%     (r = 0.44 / 0.33 / 0.25, city level); weather and hour of day are weak.
 %   * Linear regression and ridge (lambda chosen on a chronological
 %     validation split) beat persistence on validation but LOST on the
 %     held-out test period, on all 5 sensors and with multi-sensor
-%     features: they overfit one 3-day window.
+%     features (including aligned trend terms): they overfit one 3-day
+%     window, and momentum reverses sharply after pollution peaks.
 %
 % RESULTS (st_validate.m: leave-one-static-sensor-out, Foshan, forecasts
 % every 3 h; tau chosen on the first half of the origins, then the model is
