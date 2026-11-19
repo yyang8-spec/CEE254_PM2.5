@@ -8,25 +8,30 @@
 [pred, pred_sd, info] = pm_short_term(train_data, test_data);   % opts optional
 ```
 
-To validate it the way the competition scores it, run `run('short_term/st_validate.m')`. That does leave-one-sensor-out, a rolling origin every 3 h, and 585 test values per noise level.
+Validation: `run('short_term/st_validate.m')`. It does leave-one-sensor-out with a forecast every 3 h. **τ is chosen on the first half of the forecast origins only**, and the model is then scored once on the second half (`st_validate_summary.m` prints both).
+
+τ selection, development half (mean NRMSE over the 3 noise levels): τ 2 = 0.1472 (**chosen**), 5 = 0.1479, 10 = 0.1511, 20 = 0.1558.
+
+**Held-out test half** (20 origins, 13–15 Oct):
 
 | | Noise 0 | 0.5σ | 1.0σ |
 |---|---|---|---|
-| **pm_short_term (EWMA τ 5 + IDW offset)** | **0.1856** | **0.1862** | **0.1873** |
-| abl: τ = 10 min | 0.1874 | 0.1877 | 0.1884 |
-| abl: τ = 20 min | 0.1908 | 0.1910 | 0.1913 |
-| abl: no site offset | 0.1918 | 0.1924 | 0.1935 |
-| abl: keep faulty sites (none in Foshan) | 0.1856 | 0.1862 | 0.1873 |
-| **abl: no parked-vehicle rule** | 0.2165 | **0.6052** | **0.6098** |
-| base: nearest-sensor persistence | 0.2159 | 0.2152 | 0.2148 |
-| base: training mean | 0.5266 | 0.5266 | 0.5266 |
-| base: daily profile | 0.6006 | 0.6006 | 0.6005 |
+| **pm_short_term (τ = 2 min, fixed)** | **0.2038** | **0.2052** | **0.2073** |
+| abl: no site offset | 0.2102 | 0.2117 | 0.2137 |
+| abl: no parked-vehicle rule | 0.2479 | 0.7613 | 0.7698 |
+| abl: no EWMA smoothing (latest sample) | 0.2028 | 0.2393 | 0.3195 |
+| sensitivity: τ = 5 / 10 / 20 min | 0.2029 / 0.2042 / 0.2070 | 0.2037 / 0.2046 / 0.2072 | 0.2048 / 0.2052 / 0.2075 |
+| base: nearest-sensor last-hour mean | 0.2332 | 0.2329 | 0.2327 |
+| base: training mean | 0.3627 | 0.3628 | 0.3628 |
+| base: daily profile | 0.4260 | 0.4261 | 0.4261 |
 
-Missing-data check: with static data removed from the last 3 h, the calibrated-mobile fallback gives 0.238, against 0.181 with full data on the same subset. That is worse than normal operation but bounded. Before the stale-sample fix, this case gave 0.485.
+Our model reduced held-out NRMSE by about 11–13% relative to nearest-sensor persistence using the last-hour mean. The two differ in the number of sensors, the smoothing and the offset, so the gain is not attributed to one component.
 
-The parked-vehicle rule is the single most important cleaning step under noise. Without it, the fake "static sites" from a parked vehicle's GPS jitter triple the error.
+The whole period (39 origins) is a **development backtest**, because τ was tuned on part of it: ours 0.1857 / 0.1869 / 0.1894, nearest-sensor 0.2159 / 0.2152 / 0.2148. The earlier "0.1856 / 0.1862 / 0.1873" (τ = 5 chosen on the whole period) is in the same category and is superseded.
 
-Tested in GNU Octave 8.4. The code uses base MATLAB only, but it has not been run in MATLAB yet.
+Missing-data check (every 4th origin, noise 0): with static data removed from the last 3 h, the calibrated-mobile fallback gives 0.2410, against 0.1816 with full data on the same subset.
+
+Tested in GNU Octave 8.4; the quick run matched MATLAB to 4 decimals.
 
 # Single-sensor study
 

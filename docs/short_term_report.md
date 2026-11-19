@@ -1,6 +1,6 @@
 # Short-term prediction: report material
 
-Draft text and tables for the short-term part of the final report and slides. Every number comes from a script in this repo, named next to it. All of them were run on 11/12 in GNU Octave 8.4. The same code gives identical numbers in MATLAB: the quick `st_validate` run matched to 4 decimals.
+Draft text and tables for the short-term part of the final report and slides. Every number comes from a script in this repo, named next to it. They were run on 11/12–11/19 in GNU Octave 8.4. The same code gives identical numbers in MATLAB: the quick `st_validate` run matched to 4 decimals.
 
 **Task.** From 3 days of `train_data` (all static and mobile devices in Foshan, no device ID), predict the hourly mean PM2.5 for each of the next 3 hours at fixed test sites that have no data in `train_data`. The metric is NRMSE = RMSE / RMS(truth). The robustness tests add N(0, (0.5σ)²) and N(0, (1.0σ)²) noise to the training PM2.5.
 
@@ -35,10 +35,10 @@ Draft text and tables for the short-term part of the final report and slides. Ev
 | Spikes | Drop PM > median + 12 × 1.4826 × MAD (threshold 243 µg/m³) | 2,962 rows (0.14%), all mobile; max raw value 1494 | MAD keeps the threshold robust to the spikes themselves |
 | **No clipping** | Negative values are kept | — | The noise test creates negative samples, and clipping them would bias every mean upward |
 | Static vs mobile | A coordinate is static if it has data in ≥ 50% of hours, median speed < 2, and ≥ 5% of the busiest coordinate's samples | 4–5 sites found per window | There is no device ID in the matrix |
-| Parked-vehicle rule | (the 5% rule above) | Without it, a parked vehicle's GPS jitter creates ~70 fake "sites": NRMSE 0.2165 / 0.6052 / 0.6098 instead of 0.1856 / 0.1862 / 0.1873 (noise 0 / 0.5 / 1.0σ) | The most important cleaning step under noise |
+| Parked-vehicle rule | (the 5% rule above) | Without it, a parked vehicle's GPS jitter creates ~70 fake "sites": held-out test NRMSE 0.2479 / 0.7613 / 0.7698 instead of 0.2038 / 0.2052 / 0.2073 (noise 0 / 0.5 / 1.0σ) | The most important cleaning step under noise |
 | Faulty sites | Drop a site whose correlation with the others' median is < 0.7 | 0 in Foshan (sites are 0.93–0.98); catches Tianjin static #6 (0.54) | Robustness to a broken sensor |
 | Binning | 10-min means per static site (~200 samples each) | Noise reduced about 14×: about 1.8 µg/m³ per site-bin at 1.0σ | Used to check the sites, estimate the site offsets and the uncertainty. **The current level is not computed from these bins** (next row) |
-| Level smoothing | EWMA applied directly to the raw 3-s static samples, τ = 5 min | see section h | Trades noise against lag |
+| Level smoothing | EWMA applied directly to the raw 3-s static samples, τ = 2 min | see section h | Trades noise against lag |
 
 Single-sensor cleaning of static #3 (`st_single_sensor.m`): 2 Hampel spikes, 0 flat-lines of 10 min or more, 8 gaps longer than 6 s (longest 73 s), and 1 sparse 10-min bin. 99.999% of samples kept.
 
@@ -72,7 +72,7 @@ None of the examined features has a linear correlation above |r| ≈ 0.28 with t
 **Final model: multi-sensor persistence with exponential smoothing and a spatial offset correction.** PM(site, t) = L(t) + o(site), forecast held flat over h = 1..3. Linear and ridge regression were compared and not adopted (below).
 
 1. **Train** on the 3-day window, using the **10-min bin means** of each static site (S). Alternate L(t) = mean over sites of (S − o_s) and o_s = mean over time of (S − L), centred to sum to 0. The site offsets o_s are the learned parameters.
-2. **Level at the origin:** an exponentially weighted mean of every offset-corrected static sample in the last 3 h, w = exp(−age/τ) with τ = 5 min. τ was selected on the backtest from {5, 10, 20 min, last 10-min bin}.
+2. **Level at the origin:** an exponentially weighted mean (EWMA) applied directly to the **raw 3-s** offset-corrected static samples of the last 3 h, w = exp(−age/τ), with **τ = 2 min**. τ was chosen from {2, 5, 10, 20 min} on the **development half** of the backtest only (section g/h/i).
 3. **Offset at the test site:** inverse-distance weighting (power 2, minimum distance 0.2 km) of the o_s.
 4. **Fallbacks:**
    * If the newest static sample is more than 30 min old, use calibrated mobile data. The readings are shifted by the median mobile-minus-level bias of the window, and smoothed with τ = 15 min.
@@ -110,23 +110,43 @@ None of the examined features has a linear correlation above |r| ≈ 0.28 with t
 
 ## g/h/i. Results: baselines and ablations
 
-Leave-one-sensor-out over all 5 Foshan static sensors, forecasts every 3 h, 585 test values per noise level (`short_term/st_validate.m`; figure `figures/st_validation.png`):
+**Validation design** (`short_term/st_validate.m`, `short_term/st_validate_summary.m`):
+* Leave-one-sensor-out over all 5 Foshan static sensors. The held-out sensor's data is removed from training, as the competition test sites have no data in `train_data`.
+* Rolling origin: a forecast every 3 h (39 origins), each using only the 3 days before it.
+* **Chronological split of the origins.** The first half (19 origins, 11 Oct 00:00 – 13 Oct 06:00) is **development**: τ is chosen there, on the mean NRMSE over the three noise levels. The second half (20 origins, 13 Oct 09:00 – 15 Oct 21:00) is the **held-out test**, scored once with τ fixed.
+
+**τ selection, development half (mean NRMSE over noise 0 / 0.5 / 1.0σ):**
+
+| τ | 2 min | 5 min | 10 min | 20 min |
+|---|---|---|---|---|
+| Mean dev NRMSE | **0.1472** (chosen) | 0.1479 | 0.1511 | 0.1558 |
+
+τ = 2 min is the smallest value in the grid. The margin over τ = 5 min is small (0.0007).
+
+**Held-out test half** (figure `figures/st_validation.png`):
 
 | Model | Noise 0 | 0.5σ | 1.0σ |
 |---|---|---|---|
-| **Ours: EWMA τ = 5 + IDW offset** | **0.1856** | **0.1862** | **0.1873** |
-| Ablation: τ = 10 min | 0.1874 | 0.1877 | 0.1884 |
-| Ablation: τ = 20 min | 0.1908 | 0.1910 | 0.1913 |
-| Ablation: no site offset | 0.1918 | 0.1924 | 0.1935 |
-| Ablation: no parked-vehicle rule | 0.2165 | 0.6052 | 0.6098 |
-| Ablation: keep faulty sites | 0.1856 | 0.1862 | 0.1873 (none in Foshan) |
-| Baseline: nearest-sensor persistence | 0.2159 | 0.2152 | 0.2148 |
-| Baseline: training mean | 0.5266 | 0.5266 | 0.5266 |
-| Baseline: daily profile | 0.6006 | 0.6006 | 0.6005 |
+| **Ours (τ = 2 min, fixed)** | **0.2038** | **0.2052** | **0.2073** |
+| Ablation: no site offset | 0.2102 | 0.2117 | 0.2137 |
+| Ablation: no parked-vehicle rule | 0.2479 | 0.7613 | 0.7698 |
+| Ablation: no EWMA smoothing (latest sample of each site) | 0.2028 | 0.2393 | 0.3195 |
+| Sensitivity: τ = 5 min | 0.2029 | 0.2037 | 0.2048 |
+| Sensitivity: τ = 10 min | 0.2042 | 0.2046 | 0.2052 |
+| Sensitivity: τ = 20 min | 0.2070 | 0.2072 | 0.2075 |
+| Baseline: nearest-sensor last-hour mean | 0.2332 | 0.2329 | 0.2327 |
+| Baseline: training mean | 0.3627 | 0.3628 | 0.3628 |
+| Baseline: daily profile | 0.4260 | 0.4261 | 0.4261 |
 
-* **14% better than the best baseline** (0.186 vs 0.216).
-* Going from no noise to 1.0σ costs only 0.0017.
-* The single-sensor optimum is τ = 10 min (`figures/st_smoothing_vs_noise.png`). Pooling 4 sites quadruples the samples per minute, so the noise is already averaged down and a shorter τ wins.
+* **Our model reduced the held-out NRMSE by about 11–13% relative to nearest-sensor persistence using the last-hour mean** (12.6% / 11.9% / 10.9% at noise 0 / 0.5 / 1.0σ). The two methods differ in the number of sensors used, the smoothing and the offset correction, so the gain is not attributed to any one component.
+* Ablations (each removes one component, everything else fixed):
+  * **Site offset:** removing it costs about 0.006–0.007.
+  * **Parked-vehicle rule:** removing it is catastrophic under noise (0.76–0.77).
+  * **EWMA smoothing:** removing it makes no difference without noise (0.2028), but costs 0.034 at 0.5σ and 0.112 at 1.0σ. The smoothing exists for noise robustness.
+* **Sensitivity:** on the test half, τ = 5 min would have been slightly better (by ≤ 0.0025). We keep τ = 2 min because τ was fixed on the development half before the test half was scored.
+* The test half scores higher than the development half (0.204 vs 0.147). It contains the 14 Oct pollution event (failure condition 2).
+* The whole-period numbers (both halves; τ was tuned on part of them, so they are a **development backtest**, not a test result): ours 0.1857 / 0.1869 / 0.1894, nearest-sensor 0.2159 / 0.2152 / 0.2148.
+* Single sensor: the optimum is τ ≈ 10 min (`figures/st_smoothing_vs_noise.png`). Pooling 4 sites gives 4× the samples per minute, so a shorter τ wins here.
 
 **Where the remaining error is** (oracle analysis; Python prototype with hourly origins, where ours = 0.175):
 
@@ -141,22 +161,22 @@ Error grows with horizon (0.138 / 0.172 / 0.208 for h = 1/2/3) only because the 
 
 ## j. Uncertainty and limitations
 
-**Uncertainty** (`short_term/st_uncertainty.m`, 585 values):
+**Uncertainty** (`short_term/st_uncertainty.m`, 585 values, whole period, τ = 2 min):
 
 | Horizon | RMSE | Mean sd | Inside ±1 sd (68%) | Inside ±1.96 sd (95%) |
 |---|---|---|---|---|
-| h = 1 | 6.49 | 4.93 | 62.6% | 88.2% |
-| h = 2 | 7.73 | 7.45 | 79.5% | 92.3% |
-| h = 3 | 9.20 | 9.75 | 81.5% | 91.8% |
-| All | 7.88 | 7.38 | 74.5% | 90.8% |
+| h = 1 | 6.51 | 4.93 | 62.6% | 87.2% |
+| h = 2 | 7.73 | 7.45 | 80.5% | 92.8% |
+| h = 3 | 9.19 | 9.75 | 81.5% | 91.8% |
+| All | 7.89 | 7.38 | 74.9% | 90.6% |
 
-**The intervals are not well calibrated.** The 95% intervals under-cover (90.8% instead of 95%), most at h = 1 (88.2%), because the errors are heavy-tailed: pollution events produce a few large misses. The ±1 sd band is close to nominal overall (74.5% vs 68%), but it under-covers at h = 1 and over-covers at h = 2–3.
+**The intervals are not well calibrated.** The 95% intervals under-cover (90.6% instead of 95%), most at h = 1 (87.2%), because the errors are heavy-tailed: pollution events produce a few large misses. The ±1 sd band is close to nominal overall (74.9% vs 68%), but it under-covers at h = 1 and over-covers at h = 2–3.
 
 **Failure conditions**
 
 1. **Site-specific offsets.** The static sites differ by up to ±7 µg/m³ (s2 −6.8, s3 +7.5), while mobile sensors passing within 200 m read close to the city average there. The mobile-minus-static difference at the same minute is +13.9 at s2 and +3.5 at s3. This suggests the offsets **may partly reflect calibration differences between sensors**, but device, location (e.g. mounting height, distance to the road) and sampling conditions remain confounded. To the extent that an offset is specific to the test sensor, methods based on the other sensors cannot recover it: holding out s2 gives NRMSE 0.256, against 0.176 with its true offset.
 2. **Sudden pollution events.** Persistence cannot anticipate a rise or fall within the next 3 h. The examined features showed only weak linear associations with the change (|r| < 0.3), and the regressions tested did not improve on the test period. Errors peak at h = 3 and in events such as 14 Oct 06:00–12:00.
-3. **Missing static data at the forecast time.** The mobile fallback raises NRMSE from 0.181 to 0.238 (missing-data check in `st_validate.m`). Before the stale-sample fix, this case gave 0.485.
+3. **Missing static data at the forecast time.** The mobile fallback raises NRMSE from 0.182 to 0.241 (missing-data check in `st_validate.m`, every 4th origin, noise 0). Before the stale-sample fix, this case gave 0.485.
 4. **Extrapolation in space.** IDW cannot extrapolate beyond the sensors. A test site at the edge of the area, like s2, inherits a level that is too high.
 5. **Extrapolation in PM range.** The static sensors in this week stay below 180 µg/m³ (static maxima 130–177 µg/m³). Persistence itself has no range limit, but the site offsets are additive and estimated at typical levels. If a sensor's error scales with concentration, the offset will be wrong during an extreme event outside the training range.
 
@@ -170,6 +190,22 @@ Error grows with horizon (0.138 / 0.172 / 0.208 for h = 1/2/3) only because the 
   * Kriging or a GP for the offsets, with calibrated uncertainty.
   * A space-time model (Lecture 9).
   * Pre-training the change model on more weeks, if the course allows it.
+
+## Competition run (11/16 data)
+
+* **Format:** the files are MATLAB tables (time as datetime), not the matrices described in the handout. For short-term only `separated_train_data_*` is provided (static and mobile in separate tables). `pm_short_term` and `pm2d5_pred_model` accept tables directly.
+* **Static detection check:** the code's own static/mobile separation agrees with the separated files (430,643 static rows, 5 sites, none dropped). The level comes from the static EWMA, not a fallback.
+* **Time stamps mark hour ends:** the test row at 07:00 has the humidity of the co-located Canvas sensor's [06:00, 07:00) mean. So the 3 targets are [06,07), [07,08), [08,09), contiguous with the end of training (06:00). This does not change the flat prediction; `pred_sd` detects it.
+* **Test sites:** 3 fixed sensors (speed 0.16–0.32), 0.80–0.94 km from the nearest training static site.
+* **Predictions** (τ = 2 min; `submissions/pred_short_term_<n>_var.mat`), µg/m³, the same for all 3 hours:
+
+| Test site | Noise 0 | 0.5σ | 1.0σ |
+|---|---|---|---|
+| 23.057191, 113.142105 | 77.66 | 77.55 | 77.29 |
+| 23.044381, 113.142363 | 80.08 | 79.97 | 79.65 |
+| 23.048606, 113.156814 | 79.04 | 78.95 | 78.68 |
+
+* **Expected risk:** training ends during a steep rise, from about 50 µg/m³ at midnight to about 78 just before 06:00. Persistence will under-predict if the rise continues (failure condition 2).
 
 ## m. AI use (short-term part)
 

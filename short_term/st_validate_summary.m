@@ -47,14 +47,20 @@ end
 rows = [rows; {'base: nearest-sensor last-hour mean', 'baseline: nearest-sensor last-hour mean'
                'base: training mean', 'baseline: training mean'
                'base: daily profile', 'baseline: daily profile'}];
+RT = nan(size(rows,1), numel(R));             % test-half table, saved for plotting
 for part = {'TEST half (held out)', 'WHOLE period (development backtest)'}
-    sel = ~isDev; if strcmp(part{1}(1:5), 'WHOLE'), sel = true(size(isDev)); end
+    sel = ~isDev; isTest = ~strcmp(part{1}(1:5), 'WHOLE'); if ~isTest, sel = true(size(isDev)); end
     fprintf('\n=== %s, %d origins, chosen tau = %g min ===\n', part{1}, sum(sel), tauBest);
     fprintf('  %-42s', 'model'); fprintf('  noise %.1f', nz); fprintf('\n');
     for r = 1:size(rows,1)
         v = find(strcmp(labels, rows{r,1}));
         fprintf('  %-42s', rows{r,2});
-        for q = 1:numel(R), fprintf('  %9.4f', nr(R{q}, v, sel)); end
+        for q = 1:numel(R)
+            x = nr(R{q}, v, sel); fprintf('  %9.4f', x);
+            if isTest, RT(r, q) = x; end
+        end
         fprintf('\n');
     end
 end
+rowLabels = rows(:,2); %#ok<NASGU>
+save(fullfile(ROOT, 'short_term', 'validate_test_table.mat'), 'RT', 'rowLabels', 'nz', 'tauBest', 'devScore', 'TAUS', '-v7');

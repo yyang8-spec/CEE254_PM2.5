@@ -33,10 +33,12 @@ function [pred, pred_sd, info] = pm_short_term(train_data, test_data, opts)
 %     held-out test period, on all 5 sensors and with multi-sensor
 %     features: they overfit one 3-day window.
 %
-% RESULTS (leave-one-static-sensor-out backtest, Foshan, 585 test values)
-%   NRMSE   noise 0  /  0.5 sigma  /  1.0 sigma
-%   ours    0.1856   /  0.1862     /  0.1873
-%   nearest-sensor persistence baseline  0.2159 / 0.2152 / 0.2148
+% RESULTS (st_validate.m: leave-one-static-sensor-out, Foshan, forecasts
+% every 3 h; tau chosen on the first half of the origins, then the model is
+% scored once on the second half)
+%   held-out TEST half, NRMSE     noise 0  /  0.5 sigma  /  1.0 sigma
+%   ours (tau 2)                  0.2038   /  0.2052     /  0.2073
+%   nearest-sensor last-hour mean 0.2332   /  0.2329     /  0.2327
 %
 % Plain MATLAB, no toolboxes; also runs in GNU Octave.
 
@@ -88,8 +90,9 @@ info.clean.kept = sprintf('%d of %d rows', numel(tr.t), n0);
 % The last rule fixes a real bug: Foshan mobile #2 parks at a depot, and its
 % GPS jitter spreads it over ~70 coordinates with ~300 samples each and
 % >50% hourly coverage. Those passed as "static sites" and outvoted the 4
-% real ones. Ablation (st_validate.m) without this rule: NRMSE 0.2165 /
-% 0.6052 / 0.6098 at noise 0 / 0.5 / 1.0 sigma, vs 0.1856 / 0.1862 / 0.1873.
+% real ones. Ablation (st_validate.m, held-out test half) without this rule:
+% NRMSE 0.2479 / 0.7613 / 0.7698 at noise 0 / 0.5 / 1.0 sigma, vs 0.2038 /
+% 0.2052 / 0.2073 with it.
 % (5%, not more: co-located sensors - Tianjin static 1/3/4 - triple the
 % count of their shared coordinate.)
 th = floor(tr.t * 24); nHours = max(th) - min(th) + 1;
@@ -175,7 +178,7 @@ for k = 1:size(locs, 1)
     rows = (locId == k);
     % 7a. offset at the test site: inverse-distance weighting (power 2,
     %     minimum distance 0.2 km) of the sites' offsets. Validated: removing
-    %     it costs 0.006 NRMSE. (Calibrated mobile passes near the site were
+    %     it raises test-half NRMSE from 0.2038 to 0.2102 (noise 0). (Calibrated mobile passes near the site were
     %     tried as well and were worse: the static offsets are mostly sensor
     %     calibration, which vehicles driving past do not see.)
     if nS > 0
@@ -212,13 +215,14 @@ end
 function [level, tRef, src] = current_level(tr, g, siteKeys, o, isStaticRow, L, opts)
 % Exponentially weighted mean (EWMA) of EVERY raw static sample of the last
 % 3 h, offset-corrected per site:  w = exp(-age / tau).
-%   * tau trades noise against lag. tau chosen on the backtest:
-%       tau  5 min: 0.1856 / 0.1862 / 0.1873   (noise 0 / 0.5 / 1.0 sigma)
-%       tau 10 min: 0.1874 / 0.1877 / 0.1884
-%       tau 20 min: 0.1908 / 0.1910 / 0.1913
-%       last 10-min bin: 0.1873 / 0.1879 / 0.1888
-%     On ONE sensor the optimum is 10 min (single-sensor study); pooling 4
+%   * tau trades noise against lag. It is chosen on the development half
+%     of st_validate.m (mean NRMSE over noise 0 / 0.5 / 1.0 sigma):
+%       tau 2: 0.1472   tau 5: 0.1479   tau 10: 0.1511   tau 20: 0.1558
+%     On ONE sensor the optimum is ~10 min (single-sensor study); pooling 4
 %     sites gives 4x the samples, so a shorter, faster-reacting tau wins.
+%   * Removing the smoothing entirely (latest sample of each site) is as
+%     good without noise but much worse with it: test-half NRMSE 0.2028 /
+%     0.2393 / 0.3195 vs 0.2038 / 0.2052 / 0.2073.
 %   * Damping the level toward the 24-h mean (AR(1)) was worse (0.1914).
 % Static data must be RECENT to count as "now": if the newest static
 % sample is older than max_stale_min, a few stale samples would otherwise
@@ -280,8 +284,10 @@ end
 
 %% ============================== DEFAULTS =================================
 function o = fill_defaults(o)
-d.tau_min         = 5;     % EWMA time constant (minutes), chosen on the
-                           % development half of the backtest (st_validate.m)
+d.tau_min         = 2;     % EWMA time constant (minutes), chosen on the
+                           % DEVELOPMENT half of the backtest (st_validate.m):
+                           % mean dev NRMSE tau 2: .1472, 5: .1479, 10: .1511,
+                           % 20: .1558. Not re-chosen on the test half.
 d.level_method    = 'ewma';% 'ewma' | 'last' (ablation: no smoothing)
 d.bin_min         = 10;    % bin size for offsets / site checks (minutes)
 d.spike_k         = 12;    % spike threshold in robust sd
