@@ -47,22 +47,22 @@ Optional outside data suggested by the course:
 - Population: https://landscan.ornl.gov/
 - Building footprints/zoning: https://download.geofabrik.de/index.html
 
-## Quick start
+## Quick start (short-term pipeline)
+All of the short-term work is in [`short_term_pipeline/`](short_term_pipeline/README.md). From the repo root in MATLAB:
 ```matlab
-run('data_cleaning/export_device_matrices.m')  % once: tables -> numeric matrices in data/processed/
-run('validation/run_validation.m')             % backtest: our model vs. baselines vs. ablations
+run('short_term_pipeline/step0_setup/export_device_matrices.m')  % once: tables -> numeric matrices in data/processed/
+run('short_term_pipeline/RUN_ALL.m')                              % preprocessing, correlation, model comparison, validation, competition
 ```
-The competition entry point is `src/pm2d5_pred_model.m`. The approach, findings and roadmap are in [`docs/PLAN.md`](docs/PLAN.md).
+The competition entry point is `short_term_pipeline/model/pm2d5_pred_model.m`. It calls `pm_short_term.m` for problem_type 1.
 
 ## Repo layout
 ```
-src/               pm2d5_pred_model.m - the competition function (single file)
-validation/        make_task (competition-style splits), baselines, NRMSE, run_validation
-docs/PLAN.md       approach, data findings, backtest numbers, roadmap, team split
-data/raw/          original .mat files from Canvas; never edit these
-data/processed/    numeric device matrices from data_cleaning/ (git-ignored)
-data_cleaning/     cleaning / exploration notebooks + export_device_matrices.m
-figures/           exported plots for the report/presentation
+short_term_pipeline/  short-term pipeline: steps 0-5, model/, utils/, results/, figures/, submissions/, docs/
+data/raw/             original .mat files from Canvas; never edit these
+data/competition/     11/16 competition files (tables)
+data/processed/       generated numeric device matrices (git-ignored)
+data_cleaning/        team exploration notebooks (.mlx)
+figures/              team figures
 ```
 
 ## Report checklist

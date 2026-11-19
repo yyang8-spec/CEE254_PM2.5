@@ -5,7 +5,7 @@ Scripts in this folder read from `data/raw/` and write cleaned data to `data/pro
 ## Files
 | File | Owner | Status |
 |------|-------|--------|
-| `export_device_matrices.m` | | tables → numeric `dev{}` for validation |
+| `../short_term_pipeline/step0_setup/export_device_matrices.m` | | tables → numeric `dev{}` for validation |
 
 ## Cleaning decisions log
 Log each decision as you make it. This becomes section (e) of the report, which has to describe the processing *quantitatively* (e.g. how many points were removed and how that changed NRMSE).
