@@ -20,3 +20,6 @@ Thumbs.db
 octave-workspace
 !data/competition/*.mat
 !submissions/*.mat
+!short_term/results_s*.mat
+!short_term/validate_split_*.mat
+!short_term/validate_test_table.mat
