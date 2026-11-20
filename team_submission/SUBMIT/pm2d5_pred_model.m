@@ -1,22 +1,14 @@
 % ===== from team_submission/pm2d5_pred_model.m =====
 function [pred_pm2d5, pred_std] = pm2d5_pred_model(train_data, test_data, problem_type, opts)
-%PM2D5_PRED_MODEL  CEE 254 competition entry point (team dispatcher).
+%PM2D5_PRED_MODEL  CEE 254 PM2.5 prediction.
 %
 %   pred_pm2d5 = pm2d5_pred_model(train_data, test_data, problem_type)
 %
-%   train_data    training data: MATLAB table (as in the 11/16 files) or the
-%                 P x 7 matrix of the handout [time hmd tmp spd pm2d5 lat lon]
-%   test_data     table or M x 6 matrix [time hmd tmp spd lat lon]
-%   problem_type  1 = short-term (next 3 h)       -> pm_short_term
-%                 2 = long-term (next 24 h)       -> pm_long_term
-%                 3 = interpolation (5-min, day 2) -> pm_interpolation
+%   train_data    table, or P x 7 matrix [time hmd tmp spd pm2d5 lat lon]
+%   test_data     table, or M x 6 matrix [time hmd tmp spd lat lon]
+%   problem_type  1 = short-term, 2 = long-term, 3 = interpolation
 %   pred_pm2d5    M x 1 predicted PM2.5, same row order as test_data
-%   pred_std      M x 1 1-sigma uncertainty if the task model provides it, else NaN
-%   opts          optional 4th argument, passed to the task model (tuning only;
-%                 the graders call the function with 3 arguments)
-%
-% Each task model is a separate function with the same inputs. The submitted
-% single file is built from all of them by team_submission/build_submission.m.
+%   pred_std      M x 1 standard deviation if available, otherwise NaN
 
 if nargin < 4 || isempty(opts), opts = struct(); end
 M = pm2d5_pred_model__n_rows(test_data);
@@ -34,7 +26,7 @@ switch problem_type
         error('pm2d5_pred_model: problem_type must be 1, 2 or 3');
 end
 
-% --- safety net for every task: M x 1, finite, never fails the grader -------
+% output check: M x 1, missing values replaced by the training mean
 pred_pm2d5 = double(pred_pm2d5(:));
 if numel(pred_pm2d5) ~= M
     error('pm2d5_pred_model: task %d returned %d values for %d test rows', problem_type, numel(pred_pm2d5), M);
@@ -63,105 +55,54 @@ end
 
 % ===== from short_term_pipeline/model/pm_short_term.m =====
 function [pred, pred_sd, info] = pm_short_term(train_data, test_data, opts)
-%PM_SHORT_TERM  Short-term (next 3 h) PM2.5 prediction - problem_type = 1.
+%PM_SHORT_TERM  Short-term PM2.5 prediction (next 3 hours), problem_type 1.
 %
-%   pred = pm_short_term(train_data, test_data)
 %   [pred, pred_sd, info] = pm_short_term(train_data, test_data, opts)
 %
-%   train_data  P x 7  [time, humidity, temperature, speed, pm2d5, lat, lon]
-%               3 days of ALL devices (static + mobile, no device ID)
-%   test_data   M x 6  [time, humidity, temperature, speed, lat, lon]
-%               hourly rows for the next 3 h at one or more fixed test sites
-%   opts        optional struct, only for tuning / ablations (see defaults)
+%   train_data  table or P x 7 matrix [time hmd tmp spd pm2d5 lat lon]
+%   test_data   table or M x 6 matrix [time hmd tmp spd lat lon]
+%   opts        optional, overrides the defaults in pm_short_term__fill_defaults
+%   pred        M x 1 predicted PM2.5 (same row order as test_data)
+%   pred_sd     M x 1 standard deviation of the prediction
+%   info        diagnostics (cleaning counts, sites, offsets, level)
 %
-%   pred        M x 1  predicted hourly PM2.5, same row order as test_data
-%   pred_sd     M x 1  1-sigma predictive uncertainty (report section j)
-%   info        diagnostics (number of sites, dropped sites, offsets, ...)
-%
-% MODEL
-%   PM(site, t) = L(t) + o(site)
-%     L(t)    city-wide PM2.5 level. The static sensors move together (hourly
-%             correlation 0.93-0.98 in Foshan), so one shared level explains
-%             most of the variance (spread between sites ~5 ug/m3 vs ~19 over
-%             time).
-%     o(site) the site's offset from the city level.
-%   Forecast: L(t0 + h) = exponentially smoothed L at the forecast origin
-%             (persistence), held flat for h = 1, 2, 3 h.
-%
-% WHY PERSISTENCE AND NOT REGRESSION (validated, see short_term/README.md)
-%   * PM 1 h ago correlates 0.96 with PM now. Of the features tested, only
-%     the most recent 1-h trend is moderately related to the 1-3 h CHANGE
-%     (r = 0.44 / 0.33 / 0.25, city level); weather and hour of day are weak.
-%   * Linear regression and ridge (lambda chosen on a chronological
-%     validation split) beat persistence on validation but LOST on the
-%     held-out test period, on all 5 sensors and with multi-sensor
-%     features (including aligned trend terms): they overfit one 3-day
-%     window, and momentum reverses sharply after pollution peaks.
-%
-% RESULTS (st_validate.m: leave-one-static-sensor-out, Foshan, forecasts
-% every 3 h; tau chosen on the first half of the origins, then the model is
-% scored once on the second half)
-%   held-out TEST half, NRMSE     noise 0  /  0.5 sigma  /  1.0 sigma
-%   ours (tau 2)                  0.2038   /  0.2052     /  0.2073
-%   nearest-sensor last-hour mean 0.2332   /  0.2329     /  0.2327
-%
-% Plain MATLAB, no toolboxes; also runs in GNU Octave.
+% Model: PM(site, t) = L(t) + o(site)
+%   L(t)     city-wide level from the static sensors (EWMA of recent readings),
+%            held constant over the forecast horizon
+%   o(site)  site offset, inverse-distance weighted from the static sites
 
 if nargin < 3 || isempty(opts), opts = struct(); end
 opts = pm_short_term__fill_defaults(opts);
-% The 11/16 competition files are MATLAB tables, not matrices: accept both.
 train_data = pm_short_term__table_to_matrix(train_data, true);
 test_data  = pm_short_term__table_to_matrix(test_data, false);
 
-%% 1. PARSE ---------------------------------------------------------------
-% The competition gives plain matrices. Two things are not guaranteed:
-%  (a) time format: MATLAB datenum (days), POSIX seconds or milliseconds
-%  (b) column order of temperature / speed: the course PDF says
-%      [hmd tmp spd] but the Canvas tables are [hmd spd tmp].
-% Both are detected from the data instead of assumed.
+%% 1. Parse (time format and column order are detected)
 tr = pm_short_term__parse_matrix(train_data, true);
 te = pm_short_term__parse_matrix(test_data, false);
 
-%% 2. CLEAN ---------------------------------------------------------------
-% Remove only what is clearly wrong. Every step is logged in info.clean.
+%% 2. Clean
 n0 = numel(tr.t);
-% 2a. rows without time / PM / position cannot be used
 ok = isfinite(tr.t) & isfinite(tr.pm) & isfinite(tr.lat) & isfinite(tr.lon);
 info.clean.missing = sum(~ok);
-% 2b. GPS errors: (0,0) fixes or points far (> 0.5 deg ~ 50 km) from the bulk
-%     of the data. None in the Canvas files, kept for the competition data.
+% GPS errors: (0,0) or more than 0.5 deg from the median position
 mlat = pm_short_term__medn(tr.lat(ok)); mlon = pm_short_term__medn(tr.lon(ok));
 gps = (tr.lat == 0 & tr.lon == 0) | abs(tr.lat - mlat) > 0.5 | abs(tr.lon - mlon) > 0.5;
 info.clean.gps = sum(ok & gps); ok = ok & ~gps;
-% 2c. gross spikes: PM > median + k * robust sd (MAD-based, so the
-%     threshold itself is not inflated by the spikes). Mobile sensors spike
-%     to 1494 in Foshan; this removes 2,962 rows (0.14%, all mobile).
-%     NOTE: we never clip negative values. The robustness test adds
-%     zero-mean Gaussian noise to every 3-s sample; clipping the resulting
-%     negatives would bias every bin mean upward.
+% Spikes: PM > median + k * robust sd. Negative values are kept, because the
+% robustness test adds zero-mean noise and clipping would bias the means.
 p = tr.pm(ok); med = median(p); s = 1.4826 * median(abs(p - med));
 spike = tr.pm > med + opts.spike_k * max(s, 1);
 info.clean.spikes = sum(ok & spike); ok = ok & ~spike;
 tr = pm_short_term__subset(tr, ok);
 info.clean.kept = sprintf('%d of %d rows', numel(tr.t), n0);
 
-%% 3. SEPARATE STATIC FROM MOBILE ------------------------------------------
-% There is no device ID. A static sensor logs ~1200 samples/h at ONE exact
-% coordinate. A coordinate is a static site if ALL of:
-%   * it has data in >= 50% of the hours of the window (static sensors run
-%     24 h; mobile sensors are off at night),
-%   * its median speed is < 2,
-%   * it has >= 5% of the samples of the busiest coordinate.
-% The last rule fixes a real bug: Foshan mobile #2 parks at a depot, and its
-% GPS jitter spreads it over ~70 coordinates with ~300 samples each and
-% >50% hourly coverage. Those passed as "static sites" and outvoted the 4
-% real ones. Ablation (st_validate.m, held-out test half) without this rule:
-% NRMSE 0.2479 / 0.7613 / 0.7698 at noise 0 / 0.5 / 1.0 sigma, vs 0.2038 /
-% 0.2052 / 0.2073 with it.
-% (5%, not more: co-located sensors - Tianjin static 1/3/4 - triple the
-% count of their shared coordinate.)
+%% 3. Static vs mobile (no device ID in the data)
+% A coordinate is a static site if it has data in most hours, a low median
+% speed, and a sample count close to the busiest coordinate. The last
+% condition excludes parked vehicles, whose GPS jitter spreads their samples
+% over many nearby coordinates.
 th = floor(tr.t * 24); nHours = max(th) - min(th) + 1;
-key = round([tr.lat tr.lon] * 1e5);              % ~1 m resolution
+key = round([tr.lat tr.lon] * 1e5);
 [ukey, ~, g] = unique(key, 'rows');
 cnt = accumarray(g, 1);
 isSite = false(size(ukey, 1), 1);
@@ -176,10 +117,7 @@ siteKeys = find(isSite);
 isStaticRow = isSite(g);
 info.n_static_rows = sum(isStaticRow); info.n_mobile_rows = sum(~isStaticRow);
 
-%% 4. SIGNAL PROCESSING: BIN EACH STATIC SITE ------------------------------
-% 10-min bin means per site. Averaging ~200 samples per bin cuts the
-% injected noise by ~sqrt(200) = 14x (1-sigma noise ~27 ug/m3 per sample ->
-% ~1.9 per site-bin), which is why the noise test barely moves the score.
+%% 4. 10-min bin means for each static site
 bd = opts.bin_min / 1440;
 b0 = floor(min(tr.t) / bd); nb = floor(max(tr.t) / bd) - b0 + 1;
 nS = numel(siteKeys);
@@ -193,11 +131,7 @@ for j = 1:nS
 end
 S(N == 0) = NaN;
 
-%% 5. DROP FAULTY STATIC SITES ---------------------------------------------
-% A site that does not move with the others is broken or unrepresentative
-% (Tianjin static #6: corr 0.54 with the rest, reads ~7.6 where passing
-% mobile sensors read ~36). Foshan sites correlate 0.93-0.98, so 0.7 keeps
-% all of them.
+%% 5. Drop static sites that do not follow the others
 keep = true(1, nS);
 if nS >= 3
     for j = 1:nS
@@ -214,11 +148,7 @@ S = S(:, keep); N = N(:, keep); lat = lat(keep); lon = lon(keep);
 siteKeys = siteKeys(keep); nS = numel(siteKeys);
 info.n_sites = nS;
 
-%% 6. TRAIN: CITY LEVEL + SITE OFFSETS -------------------------------------
-% Alternate L(t) = mean_s(S - o_s) and o_s = mean_t(S - L) so that bins
-% where some sites are missing do not shift the level. Offsets are
-% centred (sum to 0). These offsets are the "trained" parameters of the
-% model: estimated from the 3-day training window.
+%% 6. City level L and site offsets o (alternating means, offsets sum to 0)
 o = zeros(1, nS);
 for it = 1:3
     L = mean(S - o, 2, 'omitnan');
@@ -226,26 +156,16 @@ for it = 1:3
 end
 info.site_offsets = o; info.site_latlon = [lat(:) lon(:)];
 
-%% 7. PREDICT ---------------------------------------------------------------
+%% 7. Predict
 pred = nan(numel(te.t), 1); pred_sd = pred;
 [level, tRef, src] = pm_short_term__current_level(tr, g, siteKeys, o, isStaticRow, L, opts);
 info.level = level; info.level_source = src;
-
-% uncertainty of the level: RMS change of the 10-min city level over the
-% same horizon in the training window (empirical persistence error).
-% L stays on its regular 10-min grid WITH its NaN bins, so that a lag of k
-% bins always means k*10 minutes of real time (dropping empty bins first
-% would join the two sides of a gap and mis-state the horizon).
-Lv = L;
+Lv = L;   % 10-min level, kept on its regular grid (NaN for empty bins)
 
 [locs, ~, locId] = unique(round([te.lat te.lon] * 1e5) / 1e5, 'rows');
 for k = 1:size(locs, 1)
     rows = (locId == k);
-    % 7a. offset at the test site: inverse-distance weighting (power 2,
-    %     minimum distance 0.2 km) of the sites' offsets. Validated: removing
-    %     it raises test-half NRMSE from 0.2038 to 0.2102 (noise 0). (Calibrated mobile passes near the site were
-    %     tried as well and were worse: the static offsets are mostly sensor
-    %     calibration, which vehicles driving past do not see.)
+    % offset at the test site: inverse-distance weighting of the site offsets
     if nS > 0
         d = pm_short_term__haversine_km(locs(k, 1), locs(k, 2), lat, lon);
         w = 1 ./ max(d, opts.idw_min_km) .^ opts.idw_power; w = w / sum(w);
@@ -254,45 +174,25 @@ for k = 1:size(locs, 1)
     else
         off = 0; off_sd = 0;
     end
-    % 7b. forecast = level held flat (persistence) + offset
     pred(rows) = max(level + off, opts.min_pred);
-    % 7c. uncertainty. The target is the MEAN over [t, t + 1 h), centred
-    %     30 min after t, so the persistence error is measured at the middle
-    %     of the target hour, not at t itself. (Using t understated the
-    %     h = 1 sd: 4.1 vs an actual RMSE of 6.5; see st_uncertainty.m.)
-    %     Label convention: in our validation a row stamped t is the mean of
-    %     [t, t+1h); in the 11/16 competition files it is the mean of
-    %     [t-1h, t) (checked: the test humidity equals the hour BEFORE the
-    %     stamp). Detect it: if the first stamp is ~1 h after the end of the
-    %     training data, the stamps mark hour ends.
+    % Uncertainty from the training-period change of L over the horizon,
+    % measured to the middle of each target hour. Time stamps can mark the
+    % start or the end of the hour; if the first one is about 1 h after the
+    % training data ends, they mark the end.
     lead = (min(te.t(rows)) - tRef) * 24;
     if lead > 0.75, mid = -0.5; else, mid = 0.5; end
-    hz = max((te.t(rows) - tRef) * 24 + mid, 0.1);  % hours to mid-target
+    hz = max((te.t(rows) - tRef) * 24 + mid, 0.1);
     pred_sd(rows) = sqrt(pm_short_term__persist_sd(Lv, opts.bin_min, hz).^2 + off_sd^2);
 end
 
-% last-resort fallback: never return NaN to the grader
 bad = ~isfinite(pred);
 pred(bad) = mean(tr.pm); pred_sd(bad) = std(tr.pm);
 end
 
-%% ===================== LEVEL AT THE FORECAST ORIGIN =====================
 function [level, tRef, src] = pm_short_term__current_level(tr, g, siteKeys, o, isStaticRow, L, opts)
-% Exponentially weighted mean (EWMA) of EVERY raw static sample of the last
-% 3 h, offset-corrected per site:  w = exp(-age / tau).
-%   * tau trades noise against lag. It is chosen on the development half
-%     of st_validate.m (mean NRMSE over noise 0 / 0.5 / 1.0 sigma):
-%       tau 2: 0.1472   tau 5: 0.1479   tau 10: 0.1511   tau 20: 0.1558
-%     On ONE sensor the optimum is ~10 min (single-sensor study); pooling 4
-%     sites gives 4x the samples, so a shorter, faster-reacting tau wins.
-%   * Removing the smoothing entirely (latest sample of each site) is as
-%     good without noise but much worse with it: test-half NRMSE 0.2028 /
-%     0.2393 / 0.3195 vs 0.2038 / 0.2052 / 0.2073.
-%   * Damping the level toward the 24-h mean (AR(1)) was worse (0.1914).
-% Static data must be RECENT to count as "now": if the newest static
-% sample is older than max_stale_min, a few stale samples would otherwise
-% get all the weight and an hours-old level would be used as current
-% (found by the missing-data check in st_validate.m).
+% Current city level: EWMA of the offset-corrected static samples of the last
+% 3 h, w = exp(-age / tau). Falls back to mobile data when the static data is
+% older than max_stale_min.
 tRef = max(tr.t);
 lastStatic = max([tr.t(isStaticRow); -Inf]);
 fresh = (tRef - lastStatic) * 1440 <= opts.max_stale_min;
@@ -300,10 +200,7 @@ if fresh
     [level, ok] = pm_short_term__static_ewma(tr, g, siteKeys, o, tRef, opts);
     if ok, src = 'static EWMA'; return, end
 end
-% FALLBACK 1: no static data in the last 3 h -> calibrated mobile data.
-% Mobile sensors read differently from static ones (Foshan: ~+10), so
-% their readings are shifted by the median mobile-minus-level difference
-% over the training window before smoothing.
+% Fallback 1: recent mobile data, shifted by its median difference from L
 mob = ~isStaticRow & tr.t >= tRef - 3/24;
 if any(mob) && any(isfinite(L))
     bd = opts.bin_min / 1440;
@@ -312,25 +209,22 @@ if any(mob) && any(isfinite(L))
     v = b <= numel(L) & b >= 1; b = b(v); pmM = tr.pm(allMob); pmM = pmM(v);
     bias = pm_short_term__medn(pmM - L(b));
     if ~isfinite(bias), bias = 0; end
-    w = exp(-(tRef - tr.t(mob)) * 1440 / (3 * opts.tau_min));  % fewer samples -> longer tau
+    w = exp(-(tRef - tr.t(mob)) * 1440 / (3 * opts.tau_min));
     level = sum(w .* (tr.pm(mob) - bias)) / sum(w); src = 'mobile EWMA (fallback)'; return
 end
-% FALLBACK 2: no recent mobile data either -> smooth the newest static data
-% we do have (ages measured from the last static sample)
+% Fallback 2: the most recent static data available
 if isfinite(lastStatic)
     [level, ok] = pm_short_term__static_ewma(tr, g, siteKeys, o, lastStatic, opts);
     if ok, src = 'stale static EWMA (fallback)'; return, end
 end
-% FALLBACK 3: last known level, else the training mean
+% Fallback 3: last city level, else the training mean
 v = find(isfinite(L), 1, 'last');
 if ~isempty(v), level = L(v); src = 'last level (fallback)';
 else, level = mean(tr.pm); src = 'training mean (fallback)'; end
 end
 
 function [level, ok] = pm_short_term__static_ewma(tr, g, siteKeys, o, tRef, opts)
-% opts.level_method = 'ewma' (default): exponentially weighted mean of the
-% offset-corrected samples of the last 3 h.  'last' (ablation: smoothing
-% removed): the single most recent offset-corrected sample of each site.
+% level_method 'ewma': weighted mean of the last 3 h; 'last': latest sample only
 num = 0; den = 0;
 for j = 1:numel(siteKeys)
     idx = (g == siteKeys(j)) & tr.t >= tRef - 3/24 & tr.t <= tRef;
@@ -341,52 +235,45 @@ for j = 1:numel(siteKeys)
         continue
     end
     w = exp(-(tRef - tr.t(idx)) * 1440 / opts.tau_min);
-    num = num + sum(w .* (tr.pm(idx) - o(j)));   % offset-corrected samples
+    num = num + sum(w .* (tr.pm(idx) - o(j)));
     den = den + sum(w);
 end
 ok = den > 0; level = num / max(den, eps);
 end
 
-%% ============================== DEFAULTS =================================
 function o = pm_short_term__fill_defaults(o)
-d.tau_min         = 2;     % EWMA time constant (minutes), chosen on the
-                           % DEVELOPMENT half of the backtest (st_validate.m):
-                           % mean dev NRMSE tau 2: .1472, 5: .1479, 10: .1511,
-                           % 20: .1558. Not re-chosen on the test half.
-d.level_method    = 'ewma';% 'ewma' | 'last' (ablation: no smoothing)
-d.bin_min         = 10;    % bin size for offsets / site checks (minutes)
-d.spike_k         = 12;    % spike threshold in robust sd
-d.static_cover    = 0.5;   % static site: data in >= 50% of hours
-d.static_max_spd  = 2;     % ... median speed below this
-d.static_min_frac = 0.05;  % ... >= 5% of the busiest coordinate's samples
-d.min_site_corr   = 0.7;   % drop sites that do not track the others
-d.idw_power       = 2;     % inverse-distance weighting of offsets
+d.tau_min         = 2;      % EWMA time constant (min)
+d.level_method    = 'ewma'; % 'ewma' or 'last'
+d.bin_min         = 10;     % bin size (min)
+d.spike_k         = 12;     % spike threshold (robust sd)
+d.static_cover    = 0.5;    % static site: fraction of hours with data
+d.static_max_spd  = 2;      % static site: max median speed
+d.static_min_frac = 0.05;   % static site: min fraction of the busiest count
+d.min_site_corr   = 0.7;    % min correlation with the other sites
+d.idw_power       = 2;
 d.idw_min_km      = 0.2;
-d.offset_shrink   = 1;     % 0 = ignore offsets (ablation)
-d.min_pred        = 1;     % PM2.5 sensors floor at 1
-d.max_stale_min   = 30;    % static data older than this is not "now"
+d.offset_shrink   = 1;      % 0 = no site offset
+d.min_pred        = 1;      % lowest allowed prediction
+d.max_stale_min   = 30;     % max age of static data used as "now" (min)
 f = fieldnames(d);
 for i = 1:numel(f), if ~isfield(o, f{i}), o.(f{i}) = d.(f{i}); end, end
 end
 
-%% ============================== HELPERS ==================================
 function s = pm_short_term__parse_matrix(X, isTrain)
 X = double(X);
 t = X(:, 1); m = pm_short_term__medn(t);
 if m > 1e11, t = t / 86400000 + 719529;          % POSIX ms
-elseif m > 1e8, t = t / 86400 + 719529; end      % POSIX s  (else datenum)
+elseif m > 1e8, t = t / 86400 + 719529; end      % POSIX s (else datenum)
 s.t = t; s.hmd = X(:, 2);
 c3 = X(:, 3); c4 = X(:, 4);
-% speed has a much smaller median than temperature (static/parked ~0.3)
+% speed has a much smaller median than temperature
 if pm_short_term__medn(c3) < pm_short_term__medn(c4), s.tmp = c4; s.spd = c3; else, s.tmp = c3; s.spd = c4; end
 if isTrain, s.pm = X(:, 5); s.lat = X(:, 6); s.lon = X(:, 7);
 else, s.lat = X(:, 5); s.lon = X(:, 6); end
 end
 
 function X = pm_short_term__table_to_matrix(X, isTrain)
-% MATLAB table with variables time (datetime), hmd, spd, tmp, [pm2d5], lat,
-% lon -> numeric matrix [datenum hmd tmp spd (pm2d5) lat lon]. Matrices pass
-% through unchanged (columns 3/4 are detected later in pm_short_term__parse_matrix).
+% table -> [datenum hmd tmp spd (pm2d5) lat lon]; matrices are returned as is
 if ~isa(X, 'table'), return; end
 t = X.time;
 if isdatetime(t), t.TimeZone = ''; t = datenum(t); end
@@ -403,9 +290,8 @@ for i = 1:numel(f), s.(f{i}) = s.(f{i})(ok); end
 end
 
 function sd = pm_short_term__persist_sd(Lv, binMin, hz)
-% empirical RMS of the level change over each horizon in the training data.
-% Lv is on a regular time grid (NaN = empty bin); only pairs exactly `lag`
-% bins apart with BOTH ends observed are used.
+% RMS change of the level over each horizon, using only pairs where both
+% ends are observed
 sd = zeros(size(hz));
 for i = 1:numel(hz)
     lag = max(1, round(hz(i) * 60 / binMin));
@@ -431,7 +317,7 @@ r = sum(a .* b) / sqrt(sum(a.^2) * sum(b.^2) + eps);
 end
 
 function m = pm_short_term__medn(x, dim)
-% NaN-ignoring median (Octave's median has no 'omitnan')
+% median ignoring NaN
 if nargin < 2
     x = x(isfinite(x)); if isempty(x), m = NaN; else, m = median(x); end, return
 end
@@ -445,19 +331,11 @@ end
 
 % ===== from team_submission/pm_draft_level_model.m =====
 function [pred_pm2d5, pred_std] = pm_draft_level_model(train_data, test_data, problem_type, opts)
-%PM_DRAFT_LEVEL_MODEL  DRAFT long-term (2) and interpolation (3) model.
-%
-%   Placeholder used by pm_long_term.m / pm_interpolation.m until the
-%   long-term and interpolation owners plug in their own models. It is the
-%   earlier all-in-one model:  PM(site, t) = L(t) + o(site)
-%     type 2: dew-point ridge regression of the city level + AR(1) residual
+%PM_DRAFT_LEVEL_MODEL  Draft model for long-term (2) and interpolation (3).
+%   Used by pm_long_term / pm_interpolation until they are replaced.
+%   PM(site, t) = L(t) + o(site)
+%     type 2: ridge regression of the city level on dew point + AR(1) residual
 %     type 3: city level interpolated in time across the missing window
-%   Known weakness: on the long-term validation split of the team's ridge
-%   model (held-out static #5, 14-21 May) it scores NRMSE 0.717 vs 0.547 for
-%   that model. Replace it.
-%
-%   train_data / test_data: MATLAB tables or the handout matrices.
-%   Plain MATLAB, no toolboxes.
 
 if nargin < 4 || isempty(opts), opts = struct(); end
 train_data = pm_draft_level_model__table_to_matrix(train_data, true);
@@ -478,7 +356,7 @@ M = numel(te.t);
 pred_pm2d5 = nan(M, 1);
 pred_std   = nan(M, 1);
 
-% test locations (fixed sites); predict each separately
+% predict each test location separately
 [locs, ~, locId] = unique(round([te.lat te.lon] * 1e5) / 1e5, 'rows');
 
 for k = 1:size(locs, 1)
@@ -499,7 +377,6 @@ for k = 1:size(locs, 1)
     pred_std(rows)   = sqrt(sL.^2 + off.sd.^2);
 end
 
-% last-resort fallback: never return NaN
 bad = ~isfinite(pred_pm2d5);
 if any(bad)
     pred_pm2d5(bad) = mean(tr.pm, 'omitnan');
@@ -507,41 +384,33 @@ if any(bad)
 end
 end
 
-% =============================================================================
-% Options
-% =============================================================================
 function o = pm_draft_level_model__default_opts(problem_type)
-o.min_pred        = 1;      % PM2.5 sensors floor at 1
-o.spike_mad_k     = 12;     % remove PM > median + k*1.4826*MAD (gross spikes)
-o.static_cover    = 0.5;    % a coordinate is "static" if it has data in >=50% of hours
-o.static_max_spd  = 2;      % ...and its median speed is below this
-o.static_min_frac = 0.05;   % ...and >= 5% of the busiest coordinate's samples (parked: <1%)
-o.min_site_corr   = 0.7;    % drop static sites poorly correlated with the rest
+o.min_pred        = 1;
+o.spike_mad_k     = 12;     % spike threshold (robust sd)
+o.static_cover    = 0.5;    % static site: fraction of hours with data
+o.static_max_spd  = 2;      % static site: max median speed
+o.static_min_frac = 0.05;   % static site: min fraction of the busiest count
+o.min_site_corr   = 0.7;
 o.idw_power       = 2;
 o.idw_min_km      = 0.2;
-o.offset_shrink   = 1.0;    % 0 = ignore local offsets, 1 = full IDW offset
-o.use_mobile_offset = false;% use calibrated mobile data near the test site
+o.offset_shrink   = 1.0;
+o.use_mobile_offset = false;
 o.mobile_radius_km  = 0.5;
 o.mobile_min_hours  = 3;
 switch problem_type
     case 1
-        o.bin_min     = 10;   % static sites binned at 10 min
-        o.level_method = 'ewma'; % 'ewma' (default) | 'bins'
-        o.ewma_tau_min = 5;   % EWMA time constant (min). Leave-one-sensor-out
-                              % backtest, NRMSE at noise 0 / 0.5 / 1.0 sigma:
-                              % tau 5: .1856/.1862/.1873  tau 10: .1874/.1877/.1884
-                              % tau 20: .1908/.1910/.1913  10-min bin: .1873/.1879/.1888
-                              % (pooling 4 sites -> 4x samples, so a shorter tau
-                              % than the single-sensor optimum of 10 min wins)
-        o.persist_bins = 1;   % 'bins': persistence of the last 10 min...
-        o.min_samples = 1000; % ...or longer, until >= this many raw samples
-        o.ar_damp     = false;% AR damping toward 24 h mean: hurt in backtest
+        o.bin_min     = 10;
+        o.level_method = 'ewma';
+        o.ewma_tau_min = 5;
+        o.persist_bins = 1;
+        o.min_samples = 1000;
+        o.ar_damp     = false;
     case 2
         o.bin_min     = 60;
-        o.use_met     = true; % humidity regression
-        o.use_tmp     = false;% separate temperature term: corr with PM unstable across weeks
-        o.hum_feature = 'dewpt'; % 'rh' | 'dewpt' | 'both'. Dew point: 0.361 vs RH+T 0.371
-        o.use_diurnal = false;% 24 h/12 h harmonics: hurt in backtest (0.413 vs 0.371)
+        o.use_met     = true;
+        o.use_tmp     = false;
+        o.hum_feature = 'dewpt';    % 'rh' | 'dewpt' | 'both'
+        o.use_diurnal = false;
         o.use_ar_resid = true;
         o.ridge       = 1e-3;
     case 3
@@ -558,15 +427,11 @@ for i = 1:numel(f)
 end
 end
 
-% =============================================================================
-% Parsing and cleaning
-% =============================================================================
 function tr = pm_draft_level_model__parse_train(X)
 X = double(X);
 tr.t   = pm_draft_level_model__to_days(X(:, 1));
 c3 = X(:, 3); c4 = X(:, 4);
-% Column order in the course text is [hmd tmp spd], but the provided tables
-% are [hmd spd tmp]. Speed has a much smaller median (static/parked ~0.3).
+% speed has a much smaller median than temperature
 if pm_draft_level_model__medn(c3) < pm_draft_level_model__medn(c4), tmp = c4; spd = c3; else, tmp = c3; spd = c4; end
 tr.hmd = X(:, 2); tr.tmp = tmp; tr.spd = spd;
 tr.pm  = X(:, 5); tr.lat = X(:, 6); tr.lon = X(:, 7);
@@ -582,7 +447,7 @@ te.lat = X(:, 5); te.lon = X(:, 6);
 end
 
 function d = pm_draft_level_model__to_days(t)
-% Accept MATLAB datenum (days), POSIX seconds or POSIX milliseconds.
+% datenum, POSIX seconds or POSIX milliseconds
 m = pm_draft_level_model__medn(t);
 if m > 1e11
     d = t / 86400000 + 719529;
@@ -596,12 +461,9 @@ end
 function tr = pm_draft_level_model__clean_train(tr, opts)
 ok = isfinite(tr.t) & isfinite(tr.pm) & isfinite(tr.lat) & isfinite(tr.lon);
 ok = ok & ~(tr.lat == 0 & tr.lon == 0);
-% GPS glitches: far from the bulk of the data
 mlat = median(tr.lat(ok)); mlon = median(tr.lon(ok));
 ok = ok & abs(tr.lat - mlat) < 0.5 & abs(tr.lon - mlon) < 0.5;
-% gross PM spikes only. NOTE: we deliberately do NOT clip negative values or
-% apply asymmetric filters - the robustness test adds zero-mean Gaussian
-% noise, and averaging unclipped values keeps the bin means unbiased.
+% gross spikes only; negative values are kept
 p = tr.pm(ok);
 med = median(p); s = 1.4826 * median(abs(p - med));
 ok = ok & tr.pm <= med + opts.spike_mad_k * max(s, 1);
@@ -609,19 +471,13 @@ f = fieldnames(tr);
 for i = 1:numel(f), tr.(f{i}) = tr.(f{i})(ok); end
 end
 
-% =============================================================================
-% Static sites
-% =============================================================================
 function [site, isStaticRow] = pm_draft_level_model__find_static_sites(tr, opts)
-th = floor(tr.t * 24);                      % absolute hour index
+th = floor(tr.t * 24);
 nHours = max(th) - min(th) + 1;
 key = round([tr.lat tr.lon] * 1e5);
 [ukey, ~, g] = unique(key, 'rows');
 cnt = accumarray(g, 1);
-% A real static sensor logs ~1200 samples/h at one exact coordinate. A parked
-% vehicle's GPS jitters, spreading its samples over dozens of coordinates
-% (Foshan mobile #2 at its depot: ~70 keys x ~300 samples, >50% hourly cover).
-% So also require a sample count comparable to the busiest coordinate.
+% the sample-count condition excludes parked vehicles
 cand = find(cnt > 200 & cnt >= opts.static_min_frac * max(cnt));
 isSite = false(size(ukey, 1), 1);
 for c = cand'
@@ -653,7 +509,7 @@ for j = 1:numel(siteKeys)
 end
 S(N == 0) = NaN; H(N == 0) = NaN; T(N == 0) = NaN;
 
-% drop sites that do not move with the others (e.g. Tianjin static #6)
+% drop sites that do not follow the others
 keep = true(1, size(S, 2));
 if size(S, 2) >= 3
     for j = 1:size(S, 2)
@@ -669,7 +525,7 @@ if ~any(keep), keep(:) = true; end
 S = S(:, keep); H = H(:, keep); T = T(:, keep); N = N(:, keep);
 lat = lat(keep); lon = lon(keep);
 
-% raw samples of the last 3 h per kept site (for the short-term EWMA level)
+% raw samples of the last 3 h per site
 kk = siteKeys(keep); tEnd = max(tr.t(isStaticRow));
 site.rt = cell(1, numel(kk)); site.rp = site.rt;
 for j = 1:numel(kk)
@@ -678,7 +534,7 @@ for j = 1:numel(kk)
 end
 site.tEnd = tEnd;
 
-% decompose S = city level + site offset (2 sweeps handle missing sites)
+% S = city level + site offset
 o = zeros(1, size(S, 2));
 for it = 1:3
     L = mean(S - o, 2, 'omitnan');
@@ -688,9 +544,9 @@ end
 
 site.S = S; site.H = H; site.T = T; site.N = N;
 site.lat = lat; site.lon = lon; site.offset = o;
-site.L = L;                                   % city level per bin
+site.L = L;
 site.Hc = mean(H, 2, 'omitnan'); site.Tc = mean(T, 2, 'omitnan');
-site.tb = ((b0:b1)' + 0.5) * binDays;          % bin centre times (days)
+site.tb = ((b0:b1)' + 0.5) * binDays;          % bin centres
 site.binDays = binDays;
 site.dropped = sum(~keep);
 end
@@ -712,14 +568,11 @@ a = sin((lat2 - lat1) * p / 2) .^ 2 + cos(lat1 * p) .* cos(lat2 * p) .* sin((lon
 d = 2 * 6371 * asin(min(1, sqrt(a)));
 end
 
-% =============================================================================
-% Local offset at the test location
-% =============================================================================
 function off = pm_draft_level_model__site_offset_at(tgt, site, tr, isStaticRow, opts)
 w = pm_draft_level_model__idw_weights(tgt.lat, tgt.lon, site.lat, site.lon, opts);
 o_idw = sum(w .* site.offset);
 off.value = opts.offset_shrink * o_idw;
-off.sd = std(site.offset);                    % spread of offsets = uncertainty
+off.sd = std(site.offset);
 if isnan(off.sd), off.sd = 0; end
 
 if opts.use_mobile_offset
@@ -729,7 +582,6 @@ if opts.use_mobile_offset
         near = d < opts.mobile_radius_km;
         if any(near)
             tm = tr.t(mob); pm = tr.pm(mob);
-            % calibrate mobile -> static by binwise ratio of medians
             b  = floor(tm / site.binDays);
             bs = floor(site.tb / site.binDays);
             [ub, ~, gb] = unique(b);
@@ -738,14 +590,12 @@ if opts.use_mobile_offset
             Lb = nan(size(ub)); Lb(tf) = site.L(loc(tf));
             v = isfinite(Lb) & medAll > 0;
             ratio = median(Lb(v) ./ medAll(v));
-            % local anomaly near target, per bin
             bn = b(near); [ubn, ~, gn] = unique(bn);
             mn = accumarray(gn, pm(near), [], @median) * ratio;
             [tf, loc] = ismember(ubn, bs);
             an = mn(tf) - site.L(loc(tf));
             an = an(isfinite(an));
             if numel(an) >= opts.mobile_min_hours * (60 / opts.bin_min)
-                % precision-weighted blend of static-IDW and mobile estimates
                 s2m = var(an) / numel(an) + (0.3 * std(an))^2;
                 s2s = off.sd^2 + eps;
                 wm = s2s / (s2s + s2m);
@@ -757,15 +607,10 @@ if opts.use_mobile_offset
 end
 end
 
-% =============================================================================
-% Level models
-% =============================================================================
 function [L, sL] = pm_draft_level_model__level_short(tgt, site, opts)
 Lc = site.L; v = find(isfinite(Lc));
 if strcmp(opts.level_method, 'ewma')
-    % exponentially weighted mean of every raw static sample of the last 3 h,
-    % offset-corrected per site: w = exp(-age / tau). Pools all sites, so the
-    % effective sample count is high and the injected noise averages out.
+    % EWMA of the offset-corrected static samples of the last 3 h
     num = 0; den = 0;
     for j = 1:numel(site.rt)
         if isempty(site.rt{j}), continue; end
@@ -778,11 +623,9 @@ if strcmp(opts.level_method, 'ewma')
         L = repmat(last, size(tgt.t));
         sL = pm_draft_level_model__persistence_sd(Lc(v), opts.bin_min, hz);
         return
-    end                                        % no recent data: fall back to bins
+    end
 end
-% Sample-weighted level over the most recent bins: take at least
-% persist_bins bins and keep going back until min_samples raw samples are
-% covered. A single sparse bin at a data edge is otherwise very noise-prone.
+% level from the most recent bins covering at least min_samples samples
 A = site.S - site.offset; Nw = site.N; Nw(~isfinite(A)) = 0; A(~isfinite(A)) = 0;
 num = 0; den = 0; nb = 0;
 for b = v(end):-1:1
@@ -791,15 +634,13 @@ for b = v(end):-1:1
 end
 last = num / max(den, 1);
 tLast = site.tb(v(end));
-hz = max(tgt.t - tLast, 0) * 24;               % horizon in hours
+hz = max(tgt.t - tLast, 0) * 24;
 if opts.ar_damp
-    % hourly AR(1) on the level, damp toward the last-24h mean
     [phi, mu] = pm_draft_level_model__ar1_fit(Lc(v), round(60 / opts.bin_min), 24 * 60 / opts.bin_min);
     L = mu + phi .^ hz .* (last - mu);
 else
     L = repmat(last, size(tgt.t));
 end
-% uncertainty: empirical persistence error growth in training
 sL = pm_draft_level_model__persistence_sd(Lc(v), opts.bin_min, hz);
 end
 
@@ -808,20 +649,16 @@ y = site.L; Hc = site.Hc; Tc = site.Tc; tb = site.tb;
 v = isfinite(y) & isfinite(Hc) & isfinite(Tc);
 Xtr = pm_draft_level_model__design(tb(v), Hc(v), Tc(v), opts);
 ytr = y(v);
-% standardize columns (except intercept) for ridge
 mu = mean(Xtr(:, 2:end), 1); sd = std(Xtr(:, 2:end), 0, 1); sd(sd == 0) = 1;
 Z = [ones(sum(v), 1), (Xtr(:, 2:end) - mu) ./ sd];
 R = opts.ridge * eye(size(Z, 2)); R(1, 1) = 0;
 beta = (Z' * Z + size(Z, 1) * R) \ (Z' * ytr);
 
-% future met at the test site; fill gaps with the training diurnal mean
 hf = tgt.hmd; tf = tgt.tmp;
 hf(~isfinite(hf)) = mean(Hc(v));
 tf(~isfinite(tf)) = mean(Tc(v));
 Xf = pm_draft_level_model__design(tgt.t, hf, tf, opts);
-% Never extrapolate the met features: the static enclosures' temperature can
-% be almost constant during training (tiny std -> huge coefficient), while the
-% test site's sensor varies. Clip each feature to its training range.
+% clip features to the training range
 lo = min(Xtr, [], 1); hi = max(Xtr, [], 1);
 Xf = min(max(Xf, lo), hi);
 Zf = [ones(numel(tgt.t), 1), (Xf(:, 2:end) - mu) ./ sd];
@@ -836,7 +673,7 @@ if opts.use_ar_resid && numel(res) > 5
 else
     sL = repmat(std(res), size(hz));
 end
-L = min(max(L, min(ytr)), max(ytr));          % stay inside the observed range
+L = min(max(L, min(ytr)), max(ytr));
 end
 
 function X = pm_draft_level_model__design(t, h, tm, opts)
@@ -850,7 +687,7 @@ if opts.use_met
 end
 if opts.use_met && opts.use_tmp, X = [X, tm(:)]; end
 if opts.use_diurnal
-    w = 2 * pi * mod(t(:), 1);                 % fraction of day
+    w = 2 * pi * mod(t(:), 1);
     X = [X, sin(w), cos(w), sin(2 * w), cos(2 * w)];
 end
 end
@@ -861,7 +698,6 @@ bt = floor(tgt.t / binDays);
 bs = floor(tb / binDays);
 [tf, loc] = ismember(bt, bs);
 Lc = site.L;
-% temporal interpolation of the level across the gap
 v = isfinite(Lc);
 Lint = interp1(tb(v), Lc(v), (bt + 0.5) * binDays, 'linear', 'extrap');
 
@@ -877,8 +713,7 @@ end
 off = opts.offset_shrink * sum(w .* site.offset);
 switch opts.interp_mode
     case 'idw_now'
-        % direct IDW of the simultaneous static readings (already local)
-        L = Inow - off;                        % offset added back by caller
+        L = Inow - off;
     case 'city_now'
         L = Lnow;
     case 'time_interp'
@@ -887,19 +722,16 @@ switch opts.interp_mode
         L = opts.blend_w * (Inow - off) + (1 - opts.blend_w) * Lint;
 end
 miss = ~isfinite(L);
-L(miss) = Lint(miss);                          % window blanked for every sensor
+L(miss) = Lint(miss);
 sL = repmat(std(site.offset), size(L));
 sL(miss) = sL(miss) * 2;
 end
 
-% =============================================================================
-% Small time-series helpers
-% =============================================================================
 function [phi, mu] = pm_draft_level_model__ar1_fit(x, lag, muWin)
 x = x(:);
 mu = mean(x(max(1, end - muWin + 1):end));
 a = x(1:end-lag) - mu; b = x(1+lag:end) - mu;
-phi = max(0, min(1, sum(a .* b) / sum(a .^ 2)));   % per "lag" bins = per hour
+phi = max(0, min(1, sum(a .* b) / sum(a .^ 2)));
 end
 
 function s = pm_draft_level_model__persistence_sd(x, binMin, hz)
@@ -916,7 +748,7 @@ end
 end
 
 function m = pm_draft_level_model__medn(x, dim)
-% NaN-ignoring median (Octave's median has no 'omitnan').
+% median ignoring NaN
 if nargin < 2
     x = x(isfinite(x)); if isempty(x), m = NaN; else, m = median(x); end
     return
@@ -930,8 +762,7 @@ if dim == 2, m = m.'; end
 end
 
 function td = pm_draft_level_model__dewpoint(T, RH)
-% Magnus formula, deg C. Dew point tracks absolute moisture, which in the
-% Tianjin data correlates with PM2.5 more strongly than relative humidity.
+% dew point (Magnus formula), deg C
 a = 17.62; b = 243.12;
 g = log(min(max(RH, 1), 100) / 100) + a * T ./ (b + T);
 td = b * g ./ (a - g);
@@ -948,29 +779,20 @@ end
 
 % ===== from team_submission/pm_interpolation.m =====
 function pred_pm2d5 = pm_interpolation(train_data, test_data, opts)
-%PM_INTERPOLATION  Interpolation (5-min values on day 2), problem_type 3.
-%
-%   >>> PLACEHOLDER: the interpolation owner replaces the body of this
-%   >>> function with their model (see team_submission/README.md).
-%
-%   Note (11/16 files): the test window is 22:40-23:35 on day 2, not the
-%   11:30-12:25 of the handout, and time stamps mark interval ENDS.
+%PM_INTERPOLATION  PM2.5 interpolation (5-min values on day 2), problem_type 3.
+%   pred_pm2d5: M x 1, same row order as test_data.
+%   TODO (interpolation owner): replace the line below with the interpolation model.
 
 if nargin < 3, opts = struct(); end
-pred_pm2d5 = pm_draft_level_model(train_data, test_data, 3, opts);   % DRAFT model
+pred_pm2d5 = pm_draft_level_model(train_data, test_data, 3, opts);
 end
 
 % ===== from team_submission/pm_long_term.m =====
 function pred_pm2d5 = pm_long_term(train_data, test_data, opts)
-%PM_LONG_TERM  Long-term (next 24 h) prediction, problem_type 2.
-%
-%   >>> PLACEHOLDER: the long-term owner replaces the body of this function
-%   >>> with their model (see team_submission/README.md for the contract).
-%
-%   Inputs exactly as the graders pass them: train_data / test_data are
-%   MATLAB tables (columns time hmd spd tmp pm2d5 lat lon) or the handout
-%   matrices. Output: M x 1 PM2.5, same row order as test_data.
+%PM_LONG_TERM  Long-term PM2.5 prediction (next 24 hours), problem_type 2.
+%   pred_pm2d5: M x 1, same row order as test_data.
+%   TODO (long-term owner): replace the line below with the long-term model.
 
 if nargin < 3, opts = struct(); end
-pred_pm2d5 = pm_draft_level_model(train_data, test_data, 2, opts);   % DRAFT model
+pred_pm2d5 = pm_draft_level_model(train_data, test_data, 2, opts);
 end

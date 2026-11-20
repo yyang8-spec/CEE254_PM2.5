@@ -1,21 +1,13 @@
 function [pred_pm2d5, pred_std] = pm2d5_pred_model(train_data, test_data, problem_type, opts)
-%PM2D5_PRED_MODEL  CEE 254 competition entry point (team dispatcher).
+%PM2D5_PRED_MODEL  CEE 254 PM2.5 prediction.
 %
 %   pred_pm2d5 = pm2d5_pred_model(train_data, test_data, problem_type)
 %
-%   train_data    training data: MATLAB table (as in the 11/16 files) or the
-%                 P x 7 matrix of the handout [time hmd tmp spd pm2d5 lat lon]
-%   test_data     table or M x 6 matrix [time hmd tmp spd lat lon]
-%   problem_type  1 = short-term (next 3 h)       -> pm_short_term
-%                 2 = long-term (next 24 h)       -> pm_long_term
-%                 3 = interpolation (5-min, day 2) -> pm_interpolation
+%   train_data    table, or P x 7 matrix [time hmd tmp spd pm2d5 lat lon]
+%   test_data     table, or M x 6 matrix [time hmd tmp spd lat lon]
+%   problem_type  1 = short-term, 2 = long-term, 3 = interpolation
 %   pred_pm2d5    M x 1 predicted PM2.5, same row order as test_data
-%   pred_std      M x 1 1-sigma uncertainty if the task model provides it, else NaN
-%   opts          optional 4th argument, passed to the task model (tuning only;
-%                 the graders call the function with 3 arguments)
-%
-% Each task model is a separate function with the same inputs. The submitted
-% single file is built from all of them by team_submission/build_submission.m.
+%   pred_std      M x 1 standard deviation if available, otherwise NaN
 
 if nargin < 4 || isempty(opts), opts = struct(); end
 M = n_rows(test_data);
@@ -33,7 +25,7 @@ switch problem_type
         error('pm2d5_pred_model: problem_type must be 1, 2 or 3');
 end
 
-% --- safety net for every task: M x 1, finite, never fails the grader -------
+% output check: M x 1, missing values replaced by the training mean
 pred_pm2d5 = double(pred_pm2d5(:));
 if numel(pred_pm2d5) ~= M
     error('pm2d5_pred_model: task %d returned %d values for %d test rows', problem_type, numel(pred_pm2d5), M);
