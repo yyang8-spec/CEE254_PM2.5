@@ -1,43 +1,22 @@
-function [pred_pm2d5, pred_std] = pm2d5_pred_model(train_data, test_data, problem_type, opts)
-%PM2D5_PRED_MODEL  CEE 254 competition entry point.
+function [pred_pm2d5, pred_std] = pm_draft_level_model(train_data, test_data, problem_type, opts)
+%PM_DRAFT_LEVEL_MODEL  DRAFT long-term (2) and interpolation (3) model.
 %
-%   pred = pm2d5_pred_model(train_data, test_data, problem_type)
-%   [pred, sd] = pm2d5_pred_model(..., opts)
+%   Placeholder used by pm_long_term.m / pm_interpolation.m until the
+%   long-term and interpolation owners plug in their own models. It is the
+%   earlier all-in-one model:  PM(site, t) = L(t) + o(site)
+%     type 2: dew-point ridge regression of the city level + AR(1) residual
+%     type 3: city level interpolated in time across the missing window
+%   Known weakness: on the long-term validation split of the team's ridge
+%   model (held-out static #5, 14-21 May) it scores NRMSE 0.717 vs 0.547 for
+%   that model. Replace it.
 %
-%   train_data   P x 7  [time, humidity, temperature, speed, pm2d5, lat, lon]
-%   test_data    M x 6  [time, humidity, temperature, speed, lat, lon]
-%   problem_type 1 = short-term (3 h), 2 = long-term (24 h), 3 = interpolation
-%   opts         (optional) struct overriding default_opts() - used for tuning
-%                and ablations. The competition calls it with 3 arguments.
-%
-%   pred_pm2d5   M x 1 predicted PM2.5, same row order as test_data
-%   pred_std     M x 1 rough 1-sigma predictive uncertainty
-%
-%   Model in one line:  PM(site, t) = L(t) + o(site)
-%     L(t)    city-wide level, estimated from the static sensors
-%             (type 1: last 10 min persistence,
-%              type 2: humidity/temperature/diurnal regression + AR(1) residual,
-%              type 3: level in the same 5-min bin, temporal interp if missing)
-%     o(site) local offset, inverse-distance-weighted from the static sites'
-%             mean offsets (optionally helped by calibrated mobile data)
-%
-%   Everything is plain MATLAB (no toolboxes) and also runs in GNU Octave.
+%   train_data / test_data: MATLAB tables or the handout matrices.
+%   Plain MATLAB, no toolboxes.
 
 if nargin < 4 || isempty(opts), opts = struct(); end
-% The 11/16 competition files are MATLAB tables (time as datetime); accept
-% tables as well as the P x 7 / M x 6 matrices described in the handout.
 train_data = table_to_matrix(train_data, true);
 test_data  = table_to_matrix(test_data, false);
-
-% Short-term (problem_type 1) is its own function, src/pm_short_term.m
-% (owner: short-term lead). It is self-contained - parsing, cleaning,
-% static/mobile separation, level + offset, fallbacks - and is validated by
-% short_term/st_validate.m. Set opts.legacy_short = true to use the older
-% in-file version below instead (kept only for comparison).
-if problem_type == 1 && ~(isfield(opts, 'legacy_short') && opts.legacy_short)
-    [pred_pm2d5, pred_std] = pm_short_term(train_data, test_data, opts);
-    return
-end
+if problem_type == 1, error('pm_draft_level_model: problem_type 1 is handled by pm_short_term'); end
 
 opts = fill_opts(opts, default_opts(problem_type));
 

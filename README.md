@@ -53,10 +53,11 @@ All of the short-term work is in [`short_term_pipeline/`](short_term_pipeline/RE
 run('short_term_pipeline/step0_setup/export_device_matrices.m')  % once: tables -> numeric matrices in data/processed/
 run('short_term_pipeline/RUN_ALL.m')                              % preprocessing, correlation, model comparison, validation, competition
 ```
-The competition entry point is `short_term_pipeline/model/pm2d5_pred_model.m`. It calls `pm_short_term.m` for problem_type 1.
+**Code to hand in:** `team_submission/SUBMIT/pm2d5_pred_model.m`, a single self-contained file built from each task's model. See [`team_submission/README.md`](team_submission/README.md) for how to plug in the long-term and interpolation models.
 
 ## Repo layout
 ```
+team_submission/      competition entry point, task models, build + check scripts, SUBMIT/ (the file to hand in)
 short_term_pipeline/  short-term pipeline: steps 0-5, model/, utils/, results/, figures/, submissions/, docs/
 data/raw/             original .mat files from Canvas; never edit these
 data/competition/     11/16 competition files (tables)

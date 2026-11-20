@@ -26,7 +26,7 @@ You can also open any step script and press **Run**, or run it one section at a 
 
 | Folder | Contents |
 |---|---|
-| `model/` | **`pm_short_term.m`** (the short-term model) and `pm2d5_pred_model.m` (competition entry point; calls `pm_short_term` for problem_type 1; it also contains draft long-term and interpolation models) |
+| `model/` | **`pm_short_term.m`**, the short-term model. The competition entry point `pm2d5_pred_model.m` and the single file to hand in are in `../team_submission/` |
 | `utils/` | `make_task.m` (competition-style tasks from the device data), `baseline_pred.m`, `nrmse.m`, correlation helpers, `run_validation.m` (backtest for all 3 tasks) |
 | `step*/` | The step scripts above and the scripts they call (`st_single_sensor.m`, `st_compare_sensors.m`, `st_validate.m`, ...) |
 | `results/` | Saved results of the long runs (`.mat`), read by steps 3 and 4 |

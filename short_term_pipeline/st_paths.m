@@ -14,6 +14,9 @@ P.submissions = fullfile(P.dir, 'submissions');
 sub = {'model', 'utils', 'step0_setup', 'step1_preprocessing', 'step2_correlation', ...
        'step3_model_comparison', 'step4_validation', 'step5_competition'};
 for i = 1:numel(sub), addpath(fullfile(P.dir, sub{i})); end
+% team dispatcher pm2d5_pred_model.m + long-term / interpolation models
+% (source files; NOT team_submission/SUBMIT, which holds the built single file)
+addpath(fullfile(P.root, 'team_submission'));
 for f = {P.results, P.figures, P.submissions}
     if ~exist(f{1}, 'dir'), mkdir(f{1}); end
 end
