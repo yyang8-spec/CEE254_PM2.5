@@ -6,7 +6,8 @@
 % from there (so nothing else from this repo can be picked up), on all 9
 % competition files in data/competition, and checks every output: size M x 1,
 % finite, plausible range. For short-term it also compares with the
-% predictions in short_term_pipeline/submissions (must be identical).
+% predictions in short_term_pipeline/submissions (must agree to 1e-6;
+% files produced on another machine can differ in the last digits).
 
 here = fileparts(mfilename('fullpath'));
 if isempty(here), here = fullfile(pwd, 'team_submission'); end
@@ -38,8 +39,9 @@ for task = 1:3
         extra = '';
         if task == 1
             R = load(fullfile(root, 'short_term_pipeline', 'submissions', ['pred_' tag '.mat']));
-            same = max(abs(R.pred_pm2d5 - p)) < 1e-9; ok = ok && same;
-            extra = sprintf('  identical to short_term_pipeline/submissions: %d', same);
+            d = max(abs(R.pred_pm2d5 - p));            % stored file may come from another machine:
+            same = d < 1e-6; ok = ok && same;           % allow floating-point round-off only
+            extra = sprintf('  max |diff| vs short_term_pipeline/submissions: %.1e', d);
         end
         allOK = allOK && ok;
         fprintf('  %-22s M = %3d  mean %6.2f  min %6.2f  max %6.2f  %5.1f s  %s%s\n', tag, M, mean(p), min(p), max(p), el, ...
