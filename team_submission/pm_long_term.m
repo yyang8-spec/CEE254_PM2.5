@@ -1,16 +1,21 @@
-function pred_pm2d5 = predict_long_term(train_data, test_data, var_level)
-%PREDICT_LONG_TERM  24-h hourly PM2.5 forecast at held-out static locations.
+function pred_pm2d5 = pm_long_term(train_data, test_data, opts)
+%PM_LONG_TERM  Long-term PM2.5 prediction (next 24 hours), problem_type 2.
 %
-%   pred_pm2d5 = predict_long_term(train_data, test_data, var_level)
+%   pred_pm2d5 = pm_long_term(train_data, test_data, opts)
 %
-%   train_data                  : struct loaded from separated_train_data_*.mat, with fields
-%                                 train_data_static and train_data_mobile (any field names
-%                                 containing 'static' / 'mobile' work). Each holds a table, or a
-%                                 cell array of per-sensor tables, with columns
-%                                 time, hmd, spd, tmp, pm2d5, lat, lon
-%   test_data                   : table with columns time, hmd, spd, tmp, lat, lon (no pm2d5)
-%   var_level                   : 0, 5 or 10 (training PM2.5 noise SD = 0 / 0.5 / 1.0 x clean SD)
-%   pred_pm2d5                  : M-by-1 column, row i = prediction for row i of test_data
+%   train_data : one of
+%                - struct with one field containing 'static' and one containing 'mobile'
+%                  (e.g. loaded from separated_train_data_*.mat). Each field is a table,
+%                  a cell array of per-sensor tables, or a matrix.
+%                - a single table / matrix (treated as static data, no mobile data)
+%                Columns: time hmd spd tmp pm2d5 lat lon
+%   test_data  : table or matrix, columns time hmd spd tmp lat lon
+%                (a 7-column matrix with pm2d5 in column 5 is also accepted)
+%   opts       : struct (optional). Recognised fields:
+%                  var_level  0, 5 or 10 (training PM2.5 noise level; default 0)
+%                  lambda     override the ridge penalty
+%                opts may also be the numeric var_level itself.
+%   pred_pm2d5 : M x 1 PM2.5, same row order as test_data.
 %
 % MODEL: ridge regression on sliding windows
 %   (historyDays in -> next 24 hourly PM2.5 values out, one coefficient set per lead hour).
@@ -34,8 +39,36 @@ function pred_pm2d5 = predict_long_term(train_data, test_data, var_level)
 % Toolboxes: none required. Uses Signal Processing Toolbox (butter/filtfilt) for the
 % low-pass filter if it is installed and licensed; otherwise falls back to a moving mean.
 
-%% ======================= Noise level =======================
-if nargin < 3 || isempty(var_level), var_level = 0; end
+%% ======================= Parse options =======================
+if nargin < 3 || isempty(opts), opts = struct(); end
+var_level = 0;
+lambdaOverride = [];
+if isnumeric(opts) && isscalar(opts)
+    var_level = opts;
+elseif isstruct(opts)
+    for f = {'var_level', 'varLevel', 'noise_level', 'noiseLevel'}
+        if isfield(opts, f{1}) && ~isempty(opts.(f{1}))
+            var_level = opts.(f{1});
+            break
+        end
+    end
+    if isfield(opts, 'lambda') && ~isempty(opts.lambda)
+        lambdaOverride = opts.lambda;
+    end
+end
+
+%% ======================= Normalise inputs to tables =======================
+[train_static, train_mobile] = splitTrain(train_data);
+test_data = toTable(test_data, false);
+
+pred_pm2d5 = longTermModel(train_static, train_mobile, test_data, var_level, lambdaOverride);
+end
+
+
+%% ======================= Model =======================
+function pred_pm2d5 = longTermModel(train_static, train_mobile, test_data, var_level, lambdaOverride)
+
+%% ---- Noise level ----
 switch var_level
     case 0,  lambda = 1;    % clean labels: light shrinkage
     case 5,  lambda = 3;    % noise SD = 0.5 x clean SD: shrink more
@@ -43,9 +76,10 @@ switch var_level
     otherwise
         error('var_level must be 0, 5 or 10 (got %g).', var_level);
 end
+if ~isempty(lambdaOverride), lambda = lambdaOverride; end
 % These lambda values are starting points: tune them with training-only validation.
 
-%% ======================= Settings =======================
+%% ---- Settings ----
 historyDays   = 2;      % days of input per training window (only 7 days of training exist)
 horizonH      = 24;     % forecast hours
 originStepMin = 30;     % spacing of training window origins (min)
@@ -61,20 +95,9 @@ lp_period     = 60;     % low-pass cutoff period (min)
 lp_order      = 4;      % Butterworth order
 maxGapFill    = 10;     % interpolate gaps up to this many minutes before filtering
 
-%% ======================= Split train_data into static / mobile =======================
-fn = fieldnames(train_data);
-iS = find(contains(lower(fn), 'static'));
-iM = find(contains(lower(fn), 'mobile'));
-if numel(iS) ~= 1 || numel(iM) ~= 1
-    error('train_data must have one field containing "static" and one containing "mobile" (found: %s).', ...
-        strjoin(fn', ', '));
-end
-train_static = train_data.(fn{iS});
-train_mobile = train_data.(fn{iM});
-
-%% ======================= Inputs & time grid =======================
-train_static = cleanTable(asTable(train_static), pmMax);
-train_mobile = cleanTable(asTable(train_mobile), pmMax);
+%% ---- Inputs & time grid ----
+train_static = cleanTable(train_static, pmMax);
+train_mobile = cleanTable(train_mobile, pmMax);
 
 % Forecast origin = end of training. First target is 1 h after the origin.
 s0 = min(test_data.time) - hours(1);
@@ -89,7 +112,7 @@ if nT - horizonMin < histMin
     error('Training record too short for %d-day history + %d-h horizon.', historyDays, horizonH);
 end
 
-%% ======================= Static sensors -> minute grid =======================
+%% ---- Static sensors -> minute grid ----
 % Inputs have no device ID: static sensors are identified by their fixed location.
 % Co-located sensors are merged automatically (same rounded lat/lon).
 [~, ~, sid] = unique(round([train_static.lat train_static.lon], locRound), 'rows');
@@ -111,7 +134,7 @@ for c = 1:nS
 end
 PMm = PMs ./ PMc;                   % minute-mean PM2.5 (NaN where no data)
 
-%% ======================= Remove faulty static sensors =======================
+%% ---- Remove faulty static sensors ----
 % Median PM2.5 is an outlier among sensors (robust to zero-mean training noise).
 medPM = median(PMm, 1, 'omitnan');
 bad   = isnan(medPM);
@@ -129,12 +152,12 @@ SPs = SPs(:,keep);  SPc = SPc(:,keep);
 latS = latS(keep);  lonS = lonS(keep);
 nS   = nnz(keep);
 
-%% ======================= Smoothed series for the INPUT features =======================
+%% ---- Smoothed series for the INPUT features ----
 LP  = lowpassCols(PMm, lp_period, lp_order, maxGapFill);    % low-passed PM2.5 (denoised)
 NOW = movmean(LP, [nowWin-1 0], 1, 'omitnan');              % trailing "latest" value
 
 % Mobile data: no device ID, so pool all mobile readings into one neighbour signal.
-if ~isempty(train_mobile) && height(train_mobile) > 0
+if istable(train_mobile) && height(train_mobile) > 0
     kM = floor(minutes(train_mobile.time - t0)) + 1;
     ok = kM >= 1 & kM <= nT;
     [mS, mC] = binSum(kM(ok), train_mobile.pm2d5(ok), nT);
@@ -143,7 +166,7 @@ else
     pM = nan(nT, 1);
 end
 
-%% ======================= Hourly TARGETS and covariates =======================
+%% ---- Hourly TARGETS and covariates ----
 % Exact sample mean of raw readings in (t-60, t]: hour ending at row r = rows r-59..r.
 hourMean = @(s, n) movsum(s, [59 0], 1) ./ movsum(n, [59 0], 1);
 Yh  = hourMean(PMs, PMc);
@@ -153,14 +176,14 @@ HMh = hourMean(HMs, HMc);
 TPh = hourMean(TPs, TPc);
 SPh = hourMean(SPs, SPc);
 
-%% ======================= Locations (km from static centre) =======================
+%% ---- Locations (km from static centre) ----
 lat0 = mean(latS);  lon0 = mean(lonS);
 kmN  = 111.32;  kmE = 111.32 * cosd(lat0);
 XY   = [(latS(:) - lat0) * kmN, (lonS(:) - lon0) * kmE];    % nS x 2 (north, east)
 D    = sqrt((XY(:,1) - XY(:,1)').^2 + (XY(:,2) - XY(:,2)').^2);
 idw  = @(d) 1 ./ max(d, idwFloorKm) .^ idwPow;
 
-%% ======================= Build training samples =======================
+%% ---- Build training samples ----
 bv  = (histMin : originStepMin : nT - horizonMin)';         % origin rows (last input row)
 tr  = bv + (1:horizonH) * 60;                               % target rows, nB x 24
 nB  = numel(bv);
@@ -182,7 +205,7 @@ end
 covFill = [mean(Hum(:), 'omitnan'), mean(Tmp(:), 'omitnan'), mean(Spd(:), 'omitnan')];
 covFill(isnan(covFill)) = 0;
 
-%% ======================= Fit: one ridge regression per lead hour =======================
+%% ---- Fit: one ridge regression per lead hour ----
 % Features standardised so the penalty treats them equally; intercept not penalised.
 nFeat = 9;
 coef  = nan(nFeat+1, horizonH);
@@ -199,7 +222,7 @@ for h = 1:horizonH
     coef(1,h)     = mean(yu) - mu*coef(2:end,h);
 end
 
-%% ======================= Predict test rows (in test_data order) =======================
+%% ---- Predict test rows (in test_data order) ----
 pred = nan(height(test_data), 1);
 [locT, ~, tid] = unique([test_data.lat test_data.lon], 'rows', 'stable');
 for q = 1:size(locT, 1)
@@ -221,7 +244,7 @@ for q = 1:size(locT, 1)
     end
 end
 
-%% ======================= Output checks =======================
+%% ---- Output checks ----
 pred = max(pred, 0);                                        % PM2.5 can't be negative
 fallback = median(train_static.pm2d5, 'omitnan');
 if ~isfinite(fallback), fallback = 0; end
@@ -230,14 +253,78 @@ pred_pm2d5 = double(real(pred(:)));
 end
 
 
-%% ======================= Helper functions =======================
-function T = asTable(T)
-% Accept a table, or a cell array of per-device tables (stacked into one table).
-if iscell(T)
-    T = vertcat(T{:});
+%% ======================= Input-format helpers =======================
+function [S, M] = splitTrain(train_data)
+% Return static and mobile training data as tables (M may be empty []).
+if isstruct(train_data)
+    fn = fieldnames(train_data);
+    iS = find(contains(lower(fn), 'static'));
+    iM = find(contains(lower(fn), 'mobile'));
+    if numel(iS) ~= 1
+        error('train_data struct must have exactly one field containing "static" (found: %s).', ...
+            strjoin(fn', ', '));
+    end
+    S = toTable(train_data.(fn{iS}), true);
+    if numel(iM) == 1
+        M = toTable(train_data.(fn{iM}), true);
+    else
+        M = [];
+    end
+else
+    % Single table / matrix / cell: treat everything as static sensor data.
+    S = toTable(train_data, true);
+    M = [];
 end
 end
 
+function T = toTable(X, hasPM)
+% Convert a table, cell array of tables, or numeric matrix to a table with
+% columns time hmd spd tmp [pm2d5] lat lon, with time as datetime.
+if iscell(X)
+    parts = cellfun(@(c) toTable(c, hasPM), X(:), 'UniformOutput', false);
+    parts = parts(~cellfun(@isempty, parts));
+    if isempty(parts), T = []; else, T = vertcat(parts{:}); end
+    return
+end
+if isempty(X), T = []; return; end
+
+if istable(X)
+    T = X;
+elseif isnumeric(X)
+    if size(X, 2) == 7
+        names = {'time','hmd','spd','tmp','pm2d5','lat','lon'};
+    elseif size(X, 2) == 6 && ~hasPM
+        names = {'time','hmd','spd','tmp','lat','lon'};
+    else
+        error('Expected a matrix with 7 columns (time hmd spd tmp pm2d5 lat lon) or 6 for test data; got %d.', size(X, 2));
+    end
+    T = array2table(double(X), 'VariableNames', names);
+else
+    error('Unsupported data type: %s.', class(X));
+end
+
+T.time = toDatetime(T.time);
+end
+
+function t = toDatetime(t)
+% Numeric times: POSIX seconds (~1e9) or MATLAB datenum (~7.4e5).
+if isdatetime(t), return; end
+if iscellstr(t) || isstring(t), t = datetime(t); return; end
+t = double(t);
+v = median(t, 'omitnan');
+if v > 1e11
+    t = datetime(t / 1000, 'ConvertFrom', 'posixtime');     % POSIX milliseconds
+elseif v > 1e8
+    t = datetime(t, 'ConvertFrom', 'posixtime');            % POSIX seconds
+elseif v > 6e5
+    t = datetime(t, 'ConvertFrom', 'datenum');              % MATLAB datenum
+else
+    error('Cannot interpret numeric time values (median %g).', v);
+end
+end
+
+
+%% ======================= Model helpers =======================
 function T = cleanTable(T, pmMax)
 % Remove physically impossible values. Negative PM2.5 is KEPT: at noise levels 5/10
 % the training labels are perturbed by zero-mean noise, so dropping negatives biases upward.
@@ -325,3 +412,5 @@ for c = 1:size(Y, 2)
         end
     end
 end
+end
+
