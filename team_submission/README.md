@@ -14,9 +14,9 @@ Do not edit `SUBMIT/pm2d5_pred_model.m` by hand; it is generated.
 
 | File | What | Owner |
 |---|---|---|
-| `pm2d5_pred_model.m` | Dispatcher: calls the task model by problem_type, then a safety net (M × 1 output, NaN replaced, size check) | team |
-| `../short_term_pipeline/model/pm_short_term.m` | Short-term model (problem_type 1), final | short-term lead |
-| `pm_long_term.m` | Long-term model (problem_type 2). **Placeholder** that calls the draft model | long-term owner |
+| `pm2d5_pred_model.m` | Dispatcher: calls the task model by problem_type; for long-term it splits the training data into static/mobile and estimates the noise level; then checks the output (M × 1, NaN replaced) | team |
+| `pm_short_term.m` | Short-term model (problem_type 1), final | short-term lead |
+| `pm_long_term.m` | Long-term model (problem_type 2). The dispatcher passes it the training data split into static and mobile tables, plus the estimated noise level (`opts.var_level` = 0, 5 or 10) | long-term owner |
 | `pm_interpolation.m` | Interpolation model (problem_type 3). **Placeholder** that calls the draft model | interpolation owner |
 | `pm_draft_level_model.m` | Earlier all-in-one draft used by the two placeholders. Delete it once both are replaced | — |
 | `build_submission.m` | Combines all of the above into `SUBMIT/pm2d5_pred_model.m` | — |

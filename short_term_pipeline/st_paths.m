@@ -11,10 +11,10 @@ P.competition = fullfile(P.root, 'data', 'competition');    % 11/16 Canvas files
 P.results     = fullfile(P.dir, 'results');
 P.figures     = fullfile(P.dir, 'figures');
 P.submissions = fullfile(P.dir, 'submissions');
-sub = {'model', 'utils', 'step0_setup', 'step1_preprocessing', 'step2_correlation', ...
+sub = {'utils', 'step0_setup', 'step1_preprocessing', 'step2_correlation', ...
        'step3_model_comparison', 'step4_validation', 'step5_competition'};
 for i = 1:numel(sub), addpath(fullfile(P.dir, sub{i})); end
-% team dispatcher pm2d5_pred_model.m + long-term / interpolation models
+% competition code: pm2d5_pred_model.m and the task models (incl. pm_short_term.m)
 % (source files; NOT team_submission/SUBMIT, which holds the built single file)
 addpath(fullfile(P.root, 'team_submission'));
 for f = {P.results, P.figures, P.submissions}

@@ -4,7 +4,8 @@ function [pred_pm2d5, pred_std] = pm2d5_pred_model(train_data, test_data, proble
 %
 %   pred_pm2d5 = pm2d5_pred_model(train_data, test_data, problem_type)
 %
-%   train_data    table, or P x 7 matrix [time hmd tmp spd pm2d5 lat lon]
+%   train_data    table, P x 7 matrix [time hmd tmp spd pm2d5 lat lon], or a
+%                 struct with static and mobile tables (separated_train_data)
 %   test_data     table, or M x 6 matrix [time hmd tmp spd lat lon]
 %   problem_type  1 = short-term, 2 = long-term, 3 = interpolation
 %   pred_pm2d5    M x 1 predicted PM2.5, same row order as test_data
@@ -12,15 +13,26 @@ function [pred_pm2d5, pred_std] = pm2d5_pred_model(train_data, test_data, proble
 
 if nargin < 4 || isempty(opts), opts = struct(); end
 M = pm2d5_pred_model__n_rows(test_data);
+merged = pm2d5_pred_model__merge_train(train_data);          % one table / matrix with all devices
 
 switch problem_type
     case 1
-        [pred_pm2d5, pred_std] = pm_short_term(train_data, test_data, opts);
+        [pred_pm2d5, pred_std] = pm_short_term(merged, test_data, opts);
     case 2
+        % the long-term model takes static and mobile data separately and the
+        % noise level of the training data
+        if ~isstruct(train_data)
+            isSt = pm2d5_pred_model__static_rows(merged);
+            train_data = struct('train_data_static', merged(isSt, :), ...
+                                'train_data_mobile', merged(~isSt, :));
+        end
+        if ~isfield(opts, 'var_level')
+            opts.var_level = pm2d5_pred_model__noise_level(train_data.train_data_static);
+        end
         pred_pm2d5 = pm_long_term(train_data, test_data, opts);
         pred_std = nan(M, 1);
     case 3
-        pred_pm2d5 = pm_interpolation(train_data, test_data, opts);
+        pred_pm2d5 = pm_interpolation(merged, test_data, opts);
         pred_std = nan(M, 1);
     otherwise
         error('pm2d5_pred_model: problem_type must be 1, 2 or 3');
@@ -33,301 +45,78 @@ if numel(pred_pm2d5) ~= M
 end
 bad = ~isfinite(pred_pm2d5);
 if any(bad)
-    pm = pm2d5_pred_model__train_pm(train_data); fill = mean(pm(isfinite(pm)));
+    pm = pm2d5_pred_model__col(merged, 'pm2d5'); fill = mean(pm(isfinite(pm)));
     if ~isfinite(fill), fill = 0; end
     pred_pm2d5(bad) = fill;
 end
 pred_std = double(pred_std(:));
 end
 
+function X = pm2d5_pred_model__merge_train(X)
+% struct of tables (e.g. train_data_static, train_data_mobile) -> one table
+if isstruct(X)
+    f = fieldnames(X); parts = {};
+    for i = 1:numel(f), parts{end+1} = X.(f{i}); end %#ok<AGROW>
+    X = vertcat(parts{:});
+end
+end
+
 function n = pm2d5_pred_model__n_rows(X)
 if isa(X, 'table'), n = height(X); else, n = size(X, 1); end
 end
 
-function pm = pm2d5_pred_model__train_pm(X)
-if isa(X, 'table'), pm = X.pm2d5; else, pm = X(:, 5); end
+function v = pm2d5_pred_model__col(X, name)
+% column of a table, or of a matrix [time hmd tmp spd pm2d5 lat lon]
+if isa(X, 'table'), v = X.(name); return, end
+switch name
+    case 'time',  v = X(:, 1);
+    case 'pm2d5', v = X(:, 5);
+    case 'lat',   v = X(:, 6);
+    case 'lon',   v = X(:, 7);
+    case 'spd'
+        if median(X(:, 3)) < median(X(:, 4)), v = X(:, 3); else, v = X(:, 4); end
+end
+end
+
+function t = pm2d5_pred_model__days_of(t)
+if isa(t, 'datetime'), t.TimeZone = ''; t = datenum(t); end
+end
+
+function isSt = pm2d5_pred_model__static_rows(X)
+% static sensor rows: a fixed coordinate with data in at least half of the
+% hours, low median speed, and at least 5% of the busiest coordinate's samples
+t = pm2d5_pred_model__days_of(pm2d5_pred_model__col(X, 'time'));
+[~, ~, g] = unique(round([pm2d5_pred_model__col(X, 'lat') pm2d5_pred_model__col(X, 'lon')] * 1e5), 'rows');
+cnt = accumarray(g, 1);
+th = floor(t * 24); nHours = max(th) - min(th) + 1;
+spd = pm2d5_pred_model__col(X, 'spd');
+isSite = false(numel(cnt), 1);
+for c = find(cnt > 200 & cnt >= 0.05 * max(cnt))'
+    k = (g == c);
+    isSite(c) = numel(unique(th(k))) / nHours >= 0.5 && median(spd(k)) < 2;
+end
+isSt = isSite(g);
+end
+
+function lvl = pm2d5_pred_model__noise_level(S)
+% Noise level of the training PM2.5 (0, 5 or 10 = 0, 0.5 or 1.0 x the clean
+% sd), from the spread of consecutive readings of each static sensor.
+t = pm2d5_pred_model__days_of(pm2d5_pred_model__col(S, 'time')); pm = pm2d5_pred_model__col(S, 'pm2d5');
+[~, ~, g] = unique(round([pm2d5_pred_model__col(S, 'lat') pm2d5_pred_model__col(S, 'lon')] * 1e5), 'rows');
+[~, o] = sortrows([g t]); g = g(o); t = t(o); pm = pm(o);
+same = diff(g) == 0 & diff(t) * 86400 <= 10;
+d = diff(pm); d = d(same & isfinite(d));
+if numel(d) < 100, lvl = 0; return, end
+nsd = 1.4826 * median(abs(d - median(d))) / sqrt(2);
+tot = std(pm(isfinite(pm)));
+r = nsd / sqrt(max(tot^2 - nsd^2, eps));
+if r < 0.25, lvl = 0; elseif r < 0.75, lvl = 5; else, lvl = 10; end
 end
 
 % ===========================================================================
 % Everything below is generated by team_submission/build_submission.m from the
 % task-model files listed in each "from" line. Edit those files, not this one.
 % ===========================================================================
-
-% ===== from short_term_pipeline/model/pm_short_term.m =====
-function [pred, pred_sd, info] = pm_short_term(train_data, test_data, opts)
-%PM_SHORT_TERM  Short-term PM2.5 prediction (next 3 hours), problem_type 1.
-%
-%   [pred, pred_sd, info] = pm_short_term(train_data, test_data, opts)
-%
-%   train_data  table or P x 7 matrix [time hmd tmp spd pm2d5 lat lon]
-%   test_data   table or M x 6 matrix [time hmd tmp spd lat lon]
-%   opts        optional, overrides the defaults in pm_short_term__fill_defaults
-%   pred        M x 1 predicted PM2.5 (same row order as test_data)
-%   pred_sd     M x 1 standard deviation of the prediction
-%   info        diagnostics (cleaning counts, sites, offsets, level)
-%
-% Model: PM(site, t) = L(t) + o(site)
-%   L(t)     city-wide level from the static sensors (EWMA of recent readings),
-%            held constant over the forecast horizon
-%   o(site)  site offset, inverse-distance weighted from the static sites
-
-if nargin < 3 || isempty(opts), opts = struct(); end
-opts = pm_short_term__fill_defaults(opts);
-train_data = pm_short_term__table_to_matrix(train_data, true);
-test_data  = pm_short_term__table_to_matrix(test_data, false);
-
-%% 1. Parse (time format and column order are detected)
-tr = pm_short_term__parse_matrix(train_data, true);
-te = pm_short_term__parse_matrix(test_data, false);
-
-%% 2. Clean
-n0 = numel(tr.t);
-ok = isfinite(tr.t) & isfinite(tr.pm) & isfinite(tr.lat) & isfinite(tr.lon);
-info.clean.missing = sum(~ok);
-% GPS errors: (0,0) or more than 0.5 deg from the median position
-mlat = pm_short_term__medn(tr.lat(ok)); mlon = pm_short_term__medn(tr.lon(ok));
-gps = (tr.lat == 0 & tr.lon == 0) | abs(tr.lat - mlat) > 0.5 | abs(tr.lon - mlon) > 0.5;
-info.clean.gps = sum(ok & gps); ok = ok & ~gps;
-% Spikes: PM > median + k * robust sd. Negative values are kept, because the
-% robustness test adds zero-mean noise and clipping would bias the means.
-p = tr.pm(ok); med = median(p); s = 1.4826 * median(abs(p - med));
-spike = tr.pm > med + opts.spike_k * max(s, 1);
-info.clean.spikes = sum(ok & spike); ok = ok & ~spike;
-tr = pm_short_term__subset(tr, ok);
-info.clean.kept = sprintf('%d of %d rows', numel(tr.t), n0);
-
-%% 3. Static vs mobile (no device ID in the data)
-% A coordinate is a static site if it has data in most hours, a low median
-% speed, and a sample count close to the busiest coordinate. The last
-% condition excludes parked vehicles, whose GPS jitter spreads their samples
-% over many nearby coordinates.
-th = floor(tr.t * 24); nHours = max(th) - min(th) + 1;
-key = round([tr.lat tr.lon] * 1e5);
-[ukey, ~, g] = unique(key, 'rows');
-cnt = accumarray(g, 1);
-isSite = false(size(ukey, 1), 1);
-for c = find(cnt > 200 & cnt >= opts.static_min_frac * max(cnt))'
-    idx = (g == c);
-    if numel(unique(th(idx))) / nHours >= opts.static_cover && ...
-            median(tr.spd(idx)) < opts.static_max_spd
-        isSite(c) = true;
-    end
-end
-siteKeys = find(isSite);
-isStaticRow = isSite(g);
-info.n_static_rows = sum(isStaticRow); info.n_mobile_rows = sum(~isStaticRow);
-
-%% 4. 10-min bin means for each static site
-bd = opts.bin_min / 1440;
-b0 = floor(min(tr.t) / bd); nb = floor(max(tr.t) / bd) - b0 + 1;
-nS = numel(siteKeys);
-S = nan(nb, nS); N = zeros(nb, nS); lat = zeros(1, nS); lon = lat;
-for j = 1:nS
-    idx = (g == siteKeys(j));
-    b = floor(tr.t(idx) / bd) - b0 + 1;
-    N(:, j) = accumarray(b, 1, [nb 1]);
-    S(:, j) = accumarray(b, tr.pm(idx), [nb 1]) ./ N(:, j);
-    lat(j) = ukey(siteKeys(j), 1) / 1e5; lon(j) = ukey(siteKeys(j), 2) / 1e5;
-end
-S(N == 0) = NaN;
-
-%% 5. Drop static sites that do not follow the others
-keep = true(1, nS);
-if nS >= 3
-    for j = 1:nS
-        oth = pm_short_term__medn(S(:, setdiff(1:nS, j)), 2);
-        v = isfinite(oth) & isfinite(S(:, j));
-        if sum(v) > 10 && pm_short_term__corr_simple(S(v, j), oth(v)) < opts.min_site_corr
-            keep(j) = false;
-        end
-    end
-end
-if ~any(keep), keep(:) = true; end
-info.dropped_sites = sum(~keep);
-S = S(:, keep); N = N(:, keep); lat = lat(keep); lon = lon(keep);
-siteKeys = siteKeys(keep); nS = numel(siteKeys);
-info.n_sites = nS;
-
-%% 6. City level L and site offsets o (alternating means, offsets sum to 0)
-o = zeros(1, nS);
-for it = 1:3
-    L = mean(S - o, 2, 'omitnan');
-    o = mean(S - L, 1, 'omitnan'); o = o - mean(o);
-end
-info.site_offsets = o; info.site_latlon = [lat(:) lon(:)];
-
-%% 7. Predict
-pred = nan(numel(te.t), 1); pred_sd = pred;
-[level, tRef, src] = pm_short_term__current_level(tr, g, siteKeys, o, isStaticRow, L, opts);
-info.level = level; info.level_source = src;
-Lv = L;   % 10-min level, kept on its regular grid (NaN for empty bins)
-
-[locs, ~, locId] = unique(round([te.lat te.lon] * 1e5) / 1e5, 'rows');
-for k = 1:size(locs, 1)
-    rows = (locId == k);
-    % offset at the test site: inverse-distance weighting of the site offsets
-    if nS > 0
-        d = pm_short_term__haversine_km(locs(k, 1), locs(k, 2), lat, lon);
-        w = 1 ./ max(d, opts.idw_min_km) .^ opts.idw_power; w = w / sum(w);
-        off = opts.offset_shrink * sum(w .* o);
-        off_sd = std(o);
-    else
-        off = 0; off_sd = 0;
-    end
-    pred(rows) = max(level + off, opts.min_pred);
-    % Uncertainty from the training-period change of L over the horizon,
-    % measured to the middle of each target hour. Time stamps can mark the
-    % start or the end of the hour; if the first one is about 1 h after the
-    % training data ends, they mark the end.
-    lead = (min(te.t(rows)) - tRef) * 24;
-    if lead > 0.75, mid = -0.5; else, mid = 0.5; end
-    hz = max((te.t(rows) - tRef) * 24 + mid, 0.1);
-    pred_sd(rows) = sqrt(pm_short_term__persist_sd(Lv, opts.bin_min, hz).^2 + off_sd^2);
-end
-
-bad = ~isfinite(pred);
-pred(bad) = mean(tr.pm); pred_sd(bad) = std(tr.pm);
-end
-
-function [level, tRef, src] = pm_short_term__current_level(tr, g, siteKeys, o, isStaticRow, L, opts)
-% Current city level: EWMA of the offset-corrected static samples of the last
-% 3 h, w = exp(-age / tau). Falls back to mobile data when the static data is
-% older than max_stale_min.
-tRef = max(tr.t);
-lastStatic = max([tr.t(isStaticRow); -Inf]);
-fresh = (tRef - lastStatic) * 1440 <= opts.max_stale_min;
-if fresh
-    [level, ok] = pm_short_term__static_ewma(tr, g, siteKeys, o, tRef, opts);
-    if ok, src = 'static EWMA'; return, end
-end
-% Fallback 1: recent mobile data, shifted by its median difference from L
-mob = ~isStaticRow & tr.t >= tRef - 3/24;
-if any(mob) && any(isfinite(L))
-    bd = opts.bin_min / 1440;
-    allMob = ~isStaticRow;
-    b = floor(tr.t(allMob) / bd) - floor(min(tr.t) / bd) + 1;
-    v = b <= numel(L) & b >= 1; b = b(v); pmM = tr.pm(allMob); pmM = pmM(v);
-    bias = pm_short_term__medn(pmM - L(b));
-    if ~isfinite(bias), bias = 0; end
-    w = exp(-(tRef - tr.t(mob)) * 1440 / (3 * opts.tau_min));
-    level = sum(w .* (tr.pm(mob) - bias)) / sum(w); src = 'mobile EWMA (fallback)'; return
-end
-% Fallback 2: the most recent static data available
-if isfinite(lastStatic)
-    [level, ok] = pm_short_term__static_ewma(tr, g, siteKeys, o, lastStatic, opts);
-    if ok, src = 'stale static EWMA (fallback)'; return, end
-end
-% Fallback 3: last city level, else the training mean
-v = find(isfinite(L), 1, 'last');
-if ~isempty(v), level = L(v); src = 'last level (fallback)';
-else, level = mean(tr.pm); src = 'training mean (fallback)'; end
-end
-
-function [level, ok] = pm_short_term__static_ewma(tr, g, siteKeys, o, tRef, opts)
-% level_method 'ewma': weighted mean of the last 3 h; 'last': latest sample only
-num = 0; den = 0;
-for j = 1:numel(siteKeys)
-    idx = (g == siteKeys(j)) & tr.t >= tRef - 3/24 & tr.t <= tRef;
-    if ~any(idx), continue; end
-    if strcmp(opts.level_method, 'last')
-        tj = tr.t(idx); pj = tr.pm(idx); [~, k] = max(tj);
-        num = num + (pj(k) - o(j)); den = den + 1;
-        continue
-    end
-    w = exp(-(tRef - tr.t(idx)) * 1440 / opts.tau_min);
-    num = num + sum(w .* (tr.pm(idx) - o(j)));
-    den = den + sum(w);
-end
-ok = den > 0; level = num / max(den, eps);
-end
-
-function o = pm_short_term__fill_defaults(o)
-d.tau_min         = 2;      % EWMA time constant (min)
-d.level_method    = 'ewma'; % 'ewma' or 'last'
-d.bin_min         = 10;     % bin size (min)
-d.spike_k         = 12;     % spike threshold (robust sd)
-d.static_cover    = 0.5;    % static site: fraction of hours with data
-d.static_max_spd  = 2;      % static site: max median speed
-d.static_min_frac = 0.05;   % static site: min fraction of the busiest count
-d.min_site_corr   = 0.7;    % min correlation with the other sites
-d.idw_power       = 2;
-d.idw_min_km      = 0.2;
-d.offset_shrink   = 1;      % 0 = no site offset
-d.min_pred        = 1;      % lowest allowed prediction
-d.max_stale_min   = 30;     % max age of static data used as "now" (min)
-f = fieldnames(d);
-for i = 1:numel(f), if ~isfield(o, f{i}), o.(f{i}) = d.(f{i}); end, end
-end
-
-function s = pm_short_term__parse_matrix(X, isTrain)
-X = double(X);
-t = X(:, 1); m = pm_short_term__medn(t);
-if m > 1e11, t = t / 86400000 + 719529;          % POSIX ms
-elseif m > 1e8, t = t / 86400 + 719529; end      % POSIX s (else datenum)
-s.t = t; s.hmd = X(:, 2);
-c3 = X(:, 3); c4 = X(:, 4);
-% speed has a much smaller median than temperature
-if pm_short_term__medn(c3) < pm_short_term__medn(c4), s.tmp = c4; s.spd = c3; else, s.tmp = c3; s.spd = c4; end
-if isTrain, s.pm = X(:, 5); s.lat = X(:, 6); s.lon = X(:, 7);
-else, s.lat = X(:, 5); s.lon = X(:, 6); end
-end
-
-function X = pm_short_term__table_to_matrix(X, isTrain)
-% table -> [datenum hmd tmp spd (pm2d5) lat lon]; matrices are returned as is
-if ~isa(X, 'table'), return; end
-t = X.time;
-if isdatetime(t), t.TimeZone = ''; t = datenum(t); end
-if isTrain
-    X = [t, X.hmd, X.tmp, X.spd, X.pm2d5, X.lat, X.lon];
-else
-    X = [t, X.hmd, X.tmp, X.spd, X.lat, X.lon];
-end
-end
-
-function s = pm_short_term__subset(s, ok)
-f = fieldnames(s);
-for i = 1:numel(f), s.(f{i}) = s.(f{i})(ok); end
-end
-
-function sd = pm_short_term__persist_sd(Lv, binMin, hz)
-% RMS change of the level over each horizon, using only pairs where both
-% ends are observed
-sd = zeros(size(hz));
-for i = 1:numel(hz)
-    lag = max(1, round(hz(i) * 60 / binMin));
-    if lag < numel(Lv)
-        d = Lv(1+lag:end) - Lv(1:end-lag); d = d(isfinite(d));
-    else
-        d = [];
-    end
-    if numel(d) >= 5, sd(i) = sqrt(mean(d.^2));
-    else, v = Lv(isfinite(Lv)); sd(i) = std(v); end
-end
-end
-
-function d = pm_short_term__haversine_km(lat1, lon1, lat2, lon2)
-p = pi / 180;
-a = sin((lat2 - lat1) * p / 2).^2 + cos(lat1 * p) .* cos(lat2 * p) .* sin((lon2 - lon1) * p / 2).^2;
-d = 2 * 6371 * asin(min(1, sqrt(a)));
-end
-
-function r = pm_short_term__corr_simple(a, b)
-a = a - mean(a); b = b - mean(b);
-r = sum(a .* b) / sqrt(sum(a.^2) * sum(b.^2) + eps);
-end
-
-function m = pm_short_term__medn(x, dim)
-% median ignoring NaN
-if nargin < 2
-    x = x(isfinite(x)); if isempty(x), m = NaN; else, m = median(x); end, return
-end
-if dim == 2, x = x.'; end
-m = nan(1, size(x, 2));
-for j = 1:size(x, 2)
-    c = x(isfinite(x(:, j)), j); if ~isempty(c), m(j) = median(c); end
-end
-if dim == 2, m = m.'; end
-end
 
 % ===== from team_submission/pm_draft_level_model.m =====
 function [pred_pm2d5, pred_std] = pm_draft_level_model(train_data, test_data, problem_type, opts)
@@ -790,9 +579,692 @@ end
 % ===== from team_submission/pm_long_term.m =====
 function pred_pm2d5 = pm_long_term(train_data, test_data, opts)
 %PM_LONG_TERM  Long-term PM2.5 prediction (next 24 hours), problem_type 2.
-%   pred_pm2d5: M x 1, same row order as test_data.
-%   TODO (long-term owner): replace the line below with the long-term model.
+%
+%   pred_pm2d5 = pm_long_term(train_data, test_data, opts)
+%
+%   train_data : one of
+%                - struct with one field containing 'static' and one containing 'mobile'
+%                  (e.g. loaded from separated_train_data_*.mat). Each field is a table,
+%                  a cell array of per-sensor tables, or a matrix.
+%                - a single table / matrix (treated as static data, no mobile data)
+%                Columns: time hmd spd tmp pm2d5 lat lon
+%   test_data  : table or matrix, columns time hmd spd tmp lat lon
+%                (a 7-column matrix with pm2d5 in column 5 is also accepted)
+%   opts       : struct (optional). Recognised fields:
+%                  var_level  0, 5 or 10 (training PM2.5 noise level; default 0)
+%                  lambda     override the ridge penalty
+%                opts may also be the numeric var_level itself.
+%   pred_pm2d5 : M x 1 PM2.5, same row order as test_data.
+%
+% MODEL: ridge regression on sliding windows
+%   (historyDays in -> next 24 hourly PM2.5 values out, one coefficient set per lead hour).
+%   Training targets = every static sensor. Each target's inputs come only from the OTHER
+%   static sensors (inverse-distance weighted) plus the pooled mobile data, so the model
+%   learns to predict a location from its neighbours, exactly like the held-out test sites.
+%
+%   For each lead hour h = 1..24:
+%     PM2.5(h) = b0 + b1*weekMean + b2*latest_dev + b3*dailyPattern(h) + b4*lastDay_dev
+%                   + b5*hmd(h) + b6*tmp(h) + b7*spd(h) + b8*north_km + b9*east_km
+%
+%     weekMean     = IDW neighbour mean PM2.5 over the history window before the origin
+%     latest_dev   = latest 5-min neighbour reading (static + mobile) minus weekMean
+%     dailyPattern = neighbours' value at the same clock hour on previous days minus weekMean
+%     lastDay_dev  = last-24-h neighbour mean minus weekMean
+%     hmd/tmp/spd  = target-window means of the target location (supplied in test_data)
+%     north/east   = target location in km from the static sensors' centre
+%
+%   Target at time t = mean of observations in (t-60 min, t]  (window END timestamp).
+%
+% Toolboxes: none required. Uses Signal Processing Toolbox (butter/filtfilt) for the
+% low-pass filter if it is installed and licensed; otherwise falls back to a moving mean.
 
-if nargin < 3, opts = struct(); end
-pred_pm2d5 = pm_draft_level_model(train_data, test_data, 2, opts);
+%% ======================= Parse options =======================
+if nargin < 3 || isempty(opts), opts = struct(); end
+var_level = 0;
+lambdaOverride = [];
+if isnumeric(opts) && isscalar(opts)
+    var_level = opts;
+elseif isstruct(opts)
+    for f = {'var_level', 'varLevel', 'noise_level', 'noiseLevel'}
+        if isfield(opts, f{1}) && ~isempty(opts.(f{1}))
+            var_level = opts.(f{1});
+            break
+        end
+    end
+    if isfield(opts, 'lambda') && ~isempty(opts.lambda)
+        lambdaOverride = opts.lambda;
+    end
+end
+
+%% ======================= Normalise inputs to tables =======================
+[train_static, train_mobile] = pm_long_term__splitTrain(train_data);
+test_data = pm_long_term__toTable(test_data, false);
+
+pred_pm2d5 = pm_long_term__longTermModel(train_static, train_mobile, test_data, var_level, lambdaOverride);
+end
+
+
+%% ======================= Model =======================
+function pred_pm2d5 = pm_long_term__longTermModel(train_static, train_mobile, test_data, var_level, lambdaOverride)
+
+%% ---- Noise level ----
+switch var_level
+    case 0,  lambda = 1;    % clean labels: light shrinkage
+    case 5,  lambda = 3;    % noise SD = 0.5 x clean SD: shrink more
+    case 10, lambda = 10;   % noise SD = 1.0 x clean SD: shrink most
+    otherwise
+        error('var_level must be 0, 5 or 10 (got %g).', var_level);
+end
+if ~isempty(lambdaOverride), lambda = lambdaOverride; end
+% These lambda values are starting points: tune them with training-only validation.
+
+%% ---- Settings ----
+historyDays   = 2;      % days of input per training window (only 7 days of training exist)
+horizonH      = 24;     % forecast hours
+originStepMin = 30;     % spacing of training window origins (min)
+nowWin        = 5;      % minutes averaged for the static "latest" value
+mobWin        = 5;      % minutes averaged for the mobile "latest" value
+minBlockMin   = 15;     % min minutes with data for an hourly training target to count
+minHistFrac   = 0.5;    % min fraction of history minutes with neighbour data
+idwPow        = 2;      % inverse-distance weighting power
+idwFloorKm    = 0.1;    % distance floor (km) so a very close sensor can't get infinite weight
+pmMax         = 1000;   % impossible PM2.5 values above this -> NaN
+locRound      = 4;      % decimals used to group static readings into sensors (~11 m)
+lp_period     = 60;     % low-pass cutoff period (min)
+lp_order      = 4;      % Butterworth order
+maxGapFill    = 10;     % interpolate gaps up to this many minutes before filtering
+
+%% ---- Inputs & time grid ----
+train_static = pm_long_term__cleanTable(train_static, pmMax);
+train_mobile = pm_long_term__cleanTable(train_mobile, pmMax);
+
+% Forecast origin = end of training. First target is 1 h after the origin.
+s0 = min(test_data.time) - hours(1);
+t0 = dateshift(min(train_static.time), 'start', 'minute');
+
+% Minute grid: row r = bin [t0 + (r-1) min, t0 + r min). Rows 1..nT cover data before s0.
+nT         = round(minutes(s0 - t0));
+b0         = nT;                    % last input row = origin row for the test forecast
+histMin    = historyDays * 1440;
+horizonMin = horizonH * 60;
+if nT - horizonMin < histMin
+    error('Training record too short for %d-day history + %d-h horizon.', historyDays, horizonH);
+end
+
+%% ---- Static sensors -> minute grid ----
+% Inputs have no device ID: static sensors are identified by their fixed location.
+% Co-located sensors are merged automatically (same rounded lat/lon).
+[~, ~, sid] = unique(round([train_static.lat train_static.lon], locRound), 'rows');
+nS = max(sid);
+
+kS  = floor(minutes(train_static.time - t0)) + 1;
+inG = kS >= 1 & kS <= nT;
+
+[PMs, PMc, HMs, HMc, TPs, TPc, SPs, SPc] = deal(zeros(nT, nS));
+latS = nan(1, nS);  lonS = nan(1, nS);
+for c = 1:nS
+    r = inG & sid == c;
+    [PMs(:,c), PMc(:,c)] = pm_long_term__binSum(kS(r), train_static.pm2d5(r), nT);
+    [HMs(:,c), HMc(:,c)] = pm_long_term__binSum(kS(r), train_static.hmd(r),   nT);
+    [TPs(:,c), TPc(:,c)] = pm_long_term__binSum(kS(r), train_static.tmp(r),   nT);
+    [SPs(:,c), SPc(:,c)] = pm_long_term__binSum(kS(r), train_static.spd(r),   nT);
+    latS(c) = median(train_static.lat(sid == c), 'omitnan');
+    lonS(c) = median(train_static.lon(sid == c), 'omitnan');
+end
+PMm = PMs ./ PMc;                   % minute-mean PM2.5 (NaN where no data)
+
+%% ---- Remove faulty static sensors ----
+% Median PM2.5 is an outlier among sensors (robust to zero-mean training noise).
+medPM = median(PMm, 1, 'omitnan');
+bad   = isnan(medPM);
+if nnz(~bad) >= 5
+    bad = bad | isoutlier(medPM);
+end
+if nnz(~bad) < 3                    % never drop so many that nothing is left
+    bad = isnan(medPM);
+end
+keep = ~bad;
+PMs = PMs(:,keep);  PMc = PMc(:,keep);  PMm = PMm(:,keep);
+HMs = HMs(:,keep);  HMc = HMc(:,keep);
+TPs = TPs(:,keep);  TPc = TPc(:,keep);
+SPs = SPs(:,keep);  SPc = SPc(:,keep);
+latS = latS(keep);  lonS = lonS(keep);
+nS   = nnz(keep);
+
+%% ---- Smoothed series for the INPUT features ----
+LP  = pm_long_term__lowpassCols(PMm, lp_period, lp_order, maxGapFill);    % low-passed PM2.5 (denoised)
+NOW = movmean(LP, [nowWin-1 0], 1, 'omitnan');              % trailing "latest" value
+
+% Mobile data: no device ID, so pool all mobile readings into one neighbour signal.
+if istable(train_mobile) && height(train_mobile) > 0
+    kM = floor(minutes(train_mobile.time - t0)) + 1;
+    ok = kM >= 1 & kM <= nT;
+    [mS, mC] = pm_long_term__binSum(kM(ok), train_mobile.pm2d5(ok), nT);
+    pM = movmean(mS ./ mC, [mobWin-1 0], 'omitnan');
+else
+    pM = nan(nT, 1);
+end
+
+%% ---- Hourly TARGETS and covariates ----
+% Exact sample mean of raw readings in (t-60, t]: hour ending at row r = rows r-59..r.
+hourMean = @(s, n) movsum(s, [59 0], 1) ./ movsum(n, [59 0], 1);
+Yh  = hourMean(PMs, PMc);
+cov = movsum(double(PMc > 0), [59 0], 1);
+Yh(cov < minBlockMin) = NaN;
+HMh = hourMean(HMs, HMc);
+TPh = hourMean(TPs, TPc);
+SPh = hourMean(SPs, SPc);
+
+%% ---- Locations (km from static centre) ----
+lat0 = mean(latS);  lon0 = mean(lonS);
+kmN  = 111.32;  kmE = 111.32 * cosd(lat0);
+XY   = [(latS(:) - lat0) * kmN, (lonS(:) - lon0) * kmE];    % nS x 2 (north, east)
+D    = sqrt((XY(:,1) - XY(:,1)').^2 + (XY(:,2) - XY(:,2)').^2);
+idw  = @(d) 1 ./ max(d, idwFloorKm) .^ idwPow;
+
+%% ---- Build training samples ----
+bv  = (histMin : originStepMin : nT - horizonMin)';         % origin rows (last input row)
+tr  = bv + (1:horizonH) * 60;                               % target rows, nB x 24
+nB  = numel(bv);
+
+[Wk, WkC, Dev, Dy, Nn, Ee] = deal(nan(nB*nS, 1));
+[Pf, Y, Hum, Tmp, Spd]     = deal(nan(nB*nS, horizonH));
+for j = 1:nS
+    nb = setdiff(1:nS, j);                                  % neighbours = all OTHER sensors
+    F  = pm_long_term__nbFeatures(LP(:,nb), NOW(:,nb), pM, idw(D(j,nb)), histMin);
+    B  = pm_long_term__baseAt(F, bv, horizonH, historyDays);
+    rr = (j-1)*nB + (1:nB);
+    Wk(rr) = B.wk;  WkC(rr) = B.wkCnt;  Dev(rr) = B.dv;  Dy(rr) = B.dy;  Pf(rr,:) = B.pf;
+    Y(rr,:)   = reshape(Yh(tr, j),  size(tr));
+    Hum(rr,:) = reshape(HMh(tr, j), size(tr));
+    Tmp(rr,:) = reshape(TPh(tr, j), size(tr));
+    Spd(rr,:) = reshape(SPh(tr, j), size(tr));
+    Nn(rr) = XY(j,1);  Ee(rr) = XY(j,2);
+end
+covFill = [mean(Hum(:), 'omitnan'), mean(Tmp(:), 'omitnan'), mean(Spd(:), 'omitnan')];
+covFill(isnan(covFill)) = 0;
+
+%% ---- Fit: one ridge regression per lead hour ----
+% Features standardised so the penalty treats them equally; intercept not penalised.
+nFeat = 9;
+coef  = nan(nFeat+1, horizonH);
+for h = 1:horizonH
+    Xh = [Wk Dev Pf(:,h) Dy Hum(:,h) Tmp(:,h) Spd(:,h) Nn Ee];
+    Xh = pm_long_term__fillCov(Xh, covFill);
+    use = all(isfinite(Xh), 2) & isfinite(Y(:,h)) & WkC >= minHistFrac * histMin;
+    if nnz(use) < nFeat + 2, continue; end
+    Xu = Xh(use,:);  yu = Y(use,h);
+    mu = mean(Xu, 1);  sd = std(Xu, 0, 1);  sd(sd == 0) = 1;
+    Z  = (Xu - mu) ./ sd;
+    b  = (Z'*Z + lambda*nnz(use)*eye(nFeat)) \ (Z'*(yu - mean(yu)));
+    coef(2:end,h) = b ./ sd';
+    coef(1,h)     = mean(yu) - mu*coef(2:end,h);
+end
+
+%% ---- Predict test rows (in test_data order) ----
+pred = nan(height(test_data), 1);
+[locT, ~, tid] = unique([test_data.lat test_data.lon], 'rows', 'stable');
+for q = 1:size(locT, 1)
+    xyT = [(locT(q,1) - lat0) * kmN, (locT(q,2) - lon0) * kmE];
+    d   = sqrt((XY(:,1) - xyT(1)).^2 + (XY(:,2) - xyT(2)).^2)';
+    F   = pm_long_term__nbFeatures(LP, NOW, pM, idw(d), histMin);         % all static sensors are neighbours
+    B   = pm_long_term__baseAt(F, b0, horizonH, historyDays);
+    for i = find(tid == q)'
+        h  = round(hours(test_data.time(i) - s0));
+        h  = min(max(h, 1), horizonH);
+        cv = [test_data.hmd(i) test_data.tmp(i) test_data.spd(i)];
+        cv(isnan(cv)) = covFill(isnan(cv));
+        x  = [B.wk B.dv B.pf(h) B.dy cv xyT];
+        if all(isfinite(x)) && all(isfinite(coef(:,h)))
+            pred(i) = [1 x] * coef(:,h);
+        else
+            pred(i) = B.wk + B.pf(h);                       % fallback: neighbour daily pattern
+        end
+    end
+end
+
+%% ---- Output checks ----
+pred = max(pred, 0);                                        % PM2.5 can't be negative
+fallback = median(train_static.pm2d5, 'omitnan');
+if ~isfinite(fallback), fallback = 0; end
+pred(~isfinite(pred)) = fallback;
+pred_pm2d5 = double(real(pred(:)));
+end
+
+
+%% ======================= Input-format helpers =======================
+function [S, M] = pm_long_term__splitTrain(train_data)
+% Return static and mobile training data as tables (M may be empty []).
+if isstruct(train_data)
+    fn = fieldnames(train_data);
+    iS = find(contains(lower(fn), 'static'));
+    iM = find(contains(lower(fn), 'mobile'));
+    if numel(iS) ~= 1
+        error('train_data struct must have exactly one field containing "static" (found: %s).', ...
+            strjoin(fn', ', '));
+    end
+    S = pm_long_term__toTable(train_data.(fn{iS}), true);
+    if numel(iM) == 1
+        M = pm_long_term__toTable(train_data.(fn{iM}), true);
+    else
+        M = [];
+    end
+else
+    % Single table / matrix / cell: treat everything as static sensor data.
+    S = pm_long_term__toTable(train_data, true);
+    M = [];
+end
+end
+
+function T = pm_long_term__toTable(X, hasPM)
+% Convert a table, cell array of tables, or numeric matrix to a table with
+% columns time hmd spd tmp [pm2d5] lat lon, with time as datetime.
+if iscell(X)
+    parts = cellfun(@(c) pm_long_term__toTable(c, hasPM), X(:), 'UniformOutput', false);
+    parts = parts(~cellfun(@isempty, parts));
+    if isempty(parts), T = []; else, T = vertcat(parts{:}); end
+    return
+end
+if isempty(X), T = []; return; end
+
+if istable(X)
+    T = X;
+elseif isnumeric(X)
+    if size(X, 2) == 7
+        names = {'time','hmd','spd','tmp','pm2d5','lat','lon'};
+    elseif size(X, 2) == 6 && ~hasPM
+        names = {'time','hmd','spd','tmp','lat','lon'};
+    else
+        error('Expected a matrix with 7 columns (time hmd spd tmp pm2d5 lat lon) or 6 for test data; got %d.', size(X, 2));
+    end
+    T = array2table(double(X), 'VariableNames', names);
+else
+    error('Unsupported data type: %s.', class(X));
+end
+
+T.time = pm_long_term__toDatetime(T.time);
+end
+
+function t = pm_long_term__toDatetime(t)
+% Numeric times: POSIX seconds (~1e9) or MATLAB datenum (~7.4e5).
+if isdatetime(t), return; end
+if iscellstr(t) || isstring(t), t = datetime(t); return; end
+t = double(t);
+v = median(t, 'omitnan');
+if v > 1e11
+    t = datetime(t / 1000, 'ConvertFrom', 'posixtime');     % POSIX milliseconds
+elseif v > 1e8
+    t = datetime(t, 'ConvertFrom', 'posixtime');            % POSIX seconds
+elseif v > 6e5
+    t = datetime(t, 'ConvertFrom', 'datenum');              % MATLAB datenum
+else
+    error('Cannot interpret numeric time values (median %g).', v);
+end
+end
+
+
+%% ======================= Model helpers =======================
+function T = pm_long_term__cleanTable(T, pmMax)
+% Remove physically impossible values. Negative PM2.5 is KEPT: at noise levels 5/10
+% the training labels are perturbed by zero-mean noise, so dropping negatives biases upward.
+if isempty(T) || height(T) == 0, return; end
+T = sortrows(T, 'time');
+T.pm2d5(T.pm2d5 > pmMax) = NaN;
+T.hmd(T.hmd < 0   | T.hmd > 100) = NaN;
+T.tmp(T.tmp < -30 | T.tmp > 50)  = NaN;
+T.spd(T.spd < 0) = NaN;
+end
+
+function [s, n] = pm_long_term__binSum(k, x, nT)
+% Sum and count of non-NaN values of x in each minute bin k (1..nT).
+ok = ~isnan(x);
+s  = accumarray(k(ok), x(ok), [nT 1]);
+n  = accumarray(k(ok), 1,     [nT 1]);
+end
+
+function out = pm_long_term__wmeanRows(X, w)
+% Row-wise weighted mean of X with weights w (1 x nCols), ignoring NaNs.
+M = ~isnan(X);
+X(~M) = 0;
+num = X * w(:);
+den = double(M) * w(:);
+out = num ./ den;
+out(den == 0) = NaN;
+end
+
+function F = pm_long_term__nbFeatures(LP, NOW, pM, w, histMin)
+% Neighbour series (IDW-weighted across the given static columns).
+nb      = pm_long_term__wmeanRows(LP,  w);
+nowS    = pm_long_term__wmeanRows(NOW, w);
+F.wk    = movmean(nb, [histMin-1 0], 'omitnan');            % trailing history mean
+F.wkCnt = movsum(double(~isnan(nb)), [histMin-1 0]);        % minutes it used
+F.dy    = movmean(nb, [1439 0], 'omitnan');                 % trailing 24-h mean
+F.blk   = movmean(nb, [59 0], 'omitnan');                   % hour ending at each row
+F.pl    = mean([nowS pM], 2, 'omitnan');                    % latest static + mobile
+end
+
+function B = pm_long_term__baseAt(F, bv, horizonH, historyDays)
+% Origin-time features for origin rows bv (column vector). Uses only rows <= bv
+% (dailyPattern looks at previous days, which are always before the origin).
+bv      = bv(:);
+B.wk    = F.wk(bv);
+B.wkCnt = F.wkCnt(bv);
+B.dv    = F.pl(bv) - B.wk;  B.dv(isnan(B.dv)) = 0;          % no recent data -> no correction
+B.dy    = F.dy(bv) - B.wk;  B.dy(isnan(B.dy)) = 0;
+B.pf    = zeros(numel(bv), horizonH);
+for h = 1:horizonH
+    idx = bv + h*60 - (1:historyDays)*1440;                 % same clock hour, previous days
+    v   = reshape(F.blk(idx), size(idx));
+    p   = mean(v, 2, 'omitnan') - B.wk;
+    p(isnan(p)) = 0;
+    B.pf(:,h) = p;
+end
+end
+
+function X = pm_long_term__fillCov(X, covFill)
+% Fill missing humidity / temperature / speed (columns 5-7) with training means.
+for c = 1:3
+    m = isnan(X(:, 4+c));
+    X(m, 4+c) = covFill(c);
+end
+end
+
+function lp = pm_long_term__lowpassCols(Y, period, order, maxGap)
+% Zero-phase Butterworth low-pass per column (moving-mean fallback without the toolbox).
+lp = nan(size(Y));
+useButter = exist('butter', 'file') == 2 && exist('filtfilt', 'file') == 2 && ...
+            license('test', 'Signal_Toolbox');
+if useButter
+    [bL, aL] = butter(order, (1/period) / 0.5);             % fs = 1/min, Nyquist = 0.5
+end
+minLen = max(3*order + 1, 2*period);
+for c = 1:size(Y, 2)
+    y   = fillmissing(Y(:,c), 'linear', 'MaxGap', maxGap, 'EndValues', 'none');
+    ok  = ~isnan(y);
+    seg = cumsum([ok(1); diff(ok) == 1]) .* ok;
+    for s = 1:max(seg)
+        k = seg == s;
+        if useButter && nnz(k) >= minLen
+            lp(k,c) = filtfilt(bL, aL, y(k));
+        else
+            lp(k,c) = movmean(y(k), period, 'omitnan');
+        end
+    end
+end
+end
+
+% ===== from team_submission/pm_short_term.m =====
+function [pred, pred_sd, info] = pm_short_term(train_data, test_data, opts)
+%PM_SHORT_TERM  Short-term PM2.5 prediction (next 3 hours), problem_type 1.
+%
+%   [pred, pred_sd, info] = pm_short_term(train_data, test_data, opts)
+%
+%   train_data  table or P x 7 matrix [time hmd tmp spd pm2d5 lat lon]
+%   test_data   table or M x 6 matrix [time hmd tmp spd lat lon]
+%   opts        optional, overrides the defaults in pm_short_term__fill_defaults
+%   pred        M x 1 predicted PM2.5 (same row order as test_data)
+%   pred_sd     M x 1 standard deviation of the prediction
+%   info        diagnostics (cleaning counts, sites, offsets, level)
+%
+% Model: PM(site, t) = L(t) + o(site)
+%   L(t)     city-wide level from the static sensors (EWMA of recent readings),
+%            held constant over the forecast horizon
+%   o(site)  site offset, inverse-distance weighted from the static sites
+
+if nargin < 3 || isempty(opts), opts = struct(); end
+opts = pm_short_term__fill_defaults(opts);
+train_data = pm_short_term__table_to_matrix(train_data, true);
+test_data  = pm_short_term__table_to_matrix(test_data, false);
+
+%% 1. Parse (time format and column order are detected)
+tr = pm_short_term__parse_matrix(train_data, true);
+te = pm_short_term__parse_matrix(test_data, false);
+
+%% 2. Clean
+n0 = numel(tr.t);
+ok = isfinite(tr.t) & isfinite(tr.pm) & isfinite(tr.lat) & isfinite(tr.lon);
+info.clean.missing = sum(~ok);
+% GPS errors: (0,0) or more than 0.5 deg from the median position
+mlat = pm_short_term__medn(tr.lat(ok)); mlon = pm_short_term__medn(tr.lon(ok));
+gps = (tr.lat == 0 & tr.lon == 0) | abs(tr.lat - mlat) > 0.5 | abs(tr.lon - mlon) > 0.5;
+info.clean.gps = sum(ok & gps); ok = ok & ~gps;
+% Spikes: PM > median + k * robust sd. Negative values are kept, because the
+% robustness test adds zero-mean noise and clipping would bias the means.
+p = tr.pm(ok); med = median(p); s = 1.4826 * median(abs(p - med));
+spike = tr.pm > med + opts.spike_k * max(s, 1);
+info.clean.spikes = sum(ok & spike); ok = ok & ~spike;
+tr = pm_short_term__subset(tr, ok);
+info.clean.kept = sprintf('%d of %d rows', numel(tr.t), n0);
+
+%% 3. Static vs mobile (no device ID in the data)
+% A coordinate is a static site if it has data in most hours, a low median
+% speed, and a sample count close to the busiest coordinate. The last
+% condition excludes parked vehicles, whose GPS jitter spreads their samples
+% over many nearby coordinates.
+th = floor(tr.t * 24); nHours = max(th) - min(th) + 1;
+key = round([tr.lat tr.lon] * 1e5);
+[ukey, ~, g] = unique(key, 'rows');
+cnt = accumarray(g, 1);
+isSite = false(size(ukey, 1), 1);
+for c = find(cnt > 200 & cnt >= opts.static_min_frac * max(cnt))'
+    idx = (g == c);
+    if numel(unique(th(idx))) / nHours >= opts.static_cover && ...
+            median(tr.spd(idx)) < opts.static_max_spd
+        isSite(c) = true;
+    end
+end
+siteKeys = find(isSite);
+isStaticRow = isSite(g);
+info.n_static_rows = sum(isStaticRow); info.n_mobile_rows = sum(~isStaticRow);
+
+%% 4. 10-min bin means for each static site
+bd = opts.bin_min / 1440;
+b0 = floor(min(tr.t) / bd); nb = floor(max(tr.t) / bd) - b0 + 1;
+nS = numel(siteKeys);
+S = nan(nb, nS); N = zeros(nb, nS); lat = zeros(1, nS); lon = lat;
+for j = 1:nS
+    idx = (g == siteKeys(j));
+    b = floor(tr.t(idx) / bd) - b0 + 1;
+    N(:, j) = accumarray(b, 1, [nb 1]);
+    S(:, j) = accumarray(b, tr.pm(idx), [nb 1]) ./ N(:, j);
+    lat(j) = ukey(siteKeys(j), 1) / 1e5; lon(j) = ukey(siteKeys(j), 2) / 1e5;
+end
+S(N == 0) = NaN;
+
+%% 5. Drop static sites that do not follow the others
+keep = true(1, nS);
+if nS >= 3
+    for j = 1:nS
+        oth = pm_short_term__medn(S(:, setdiff(1:nS, j)), 2);
+        v = isfinite(oth) & isfinite(S(:, j));
+        if sum(v) > 10 && pm_short_term__corr_simple(S(v, j), oth(v)) < opts.min_site_corr
+            keep(j) = false;
+        end
+    end
+end
+if ~any(keep), keep(:) = true; end
+info.dropped_sites = sum(~keep);
+S = S(:, keep); N = N(:, keep); lat = lat(keep); lon = lon(keep);
+siteKeys = siteKeys(keep); nS = numel(siteKeys);
+info.n_sites = nS;
+
+%% 6. City level L and site offsets o (alternating means, offsets sum to 0)
+o = zeros(1, nS);
+for it = 1:3
+    L = mean(S - o, 2, 'omitnan');
+    o = mean(S - L, 1, 'omitnan'); o = o - mean(o);
+end
+info.site_offsets = o; info.site_latlon = [lat(:) lon(:)];
+
+%% 7. Predict
+pred = nan(numel(te.t), 1); pred_sd = pred;
+[level, tRef, src] = pm_short_term__current_level(tr, g, siteKeys, o, isStaticRow, L, opts);
+info.level = level; info.level_source = src;
+Lv = L;   % 10-min level, kept on its regular grid (NaN for empty bins)
+
+[locs, ~, locId] = unique(round([te.lat te.lon] * 1e5) / 1e5, 'rows');
+for k = 1:size(locs, 1)
+    rows = (locId == k);
+    % offset at the test site: inverse-distance weighting of the site offsets
+    if nS > 0
+        d = pm_short_term__haversine_km(locs(k, 1), locs(k, 2), lat, lon);
+        w = 1 ./ max(d, opts.idw_min_km) .^ opts.idw_power; w = w / sum(w);
+        off = opts.offset_shrink * sum(w .* o);
+        off_sd = std(o);
+    else
+        off = 0; off_sd = 0;
+    end
+    pred(rows) = max(level + off, opts.min_pred);
+    % Uncertainty from the training-period change of L over the horizon,
+    % measured to the middle of each target hour. Time stamps can mark the
+    % start or the end of the hour; if the first one is about 1 h after the
+    % training data ends, they mark the end.
+    lead = (min(te.t(rows)) - tRef) * 24;
+    if lead > 0.75, mid = -0.5; else, mid = 0.5; end
+    hz = max((te.t(rows) - tRef) * 24 + mid, 0.1);
+    pred_sd(rows) = sqrt(pm_short_term__persist_sd(Lv, opts.bin_min, hz).^2 + off_sd^2);
+end
+
+bad = ~isfinite(pred);
+pred(bad) = mean(tr.pm); pred_sd(bad) = std(tr.pm);
+end
+
+function [level, tRef, src] = pm_short_term__current_level(tr, g, siteKeys, o, isStaticRow, L, opts)
+% Current city level: EWMA of the offset-corrected static samples of the last
+% 3 h, w = exp(-age / tau). Falls back to mobile data when the static data is
+% older than max_stale_min.
+tRef = max(tr.t);
+lastStatic = max([tr.t(isStaticRow); -Inf]);
+fresh = (tRef - lastStatic) * 1440 <= opts.max_stale_min;
+if fresh
+    [level, ok] = pm_short_term__static_ewma(tr, g, siteKeys, o, tRef, opts);
+    if ok, src = 'static EWMA'; return, end
+end
+% Fallback 1: recent mobile data, shifted by its median difference from L
+mob = ~isStaticRow & tr.t >= tRef - 3/24;
+if any(mob) && any(isfinite(L))
+    bd = opts.bin_min / 1440;
+    allMob = ~isStaticRow;
+    b = floor(tr.t(allMob) / bd) - floor(min(tr.t) / bd) + 1;
+    v = b <= numel(L) & b >= 1; b = b(v); pmM = tr.pm(allMob); pmM = pmM(v);
+    bias = pm_short_term__medn(pmM - L(b));
+    if ~isfinite(bias), bias = 0; end
+    w = exp(-(tRef - tr.t(mob)) * 1440 / (3 * opts.tau_min));
+    level = sum(w .* (tr.pm(mob) - bias)) / sum(w); src = 'mobile EWMA (fallback)'; return
+end
+% Fallback 2: the most recent static data available
+if isfinite(lastStatic)
+    [level, ok] = pm_short_term__static_ewma(tr, g, siteKeys, o, lastStatic, opts);
+    if ok, src = 'stale static EWMA (fallback)'; return, end
+end
+% Fallback 3: last city level, else the training mean
+v = find(isfinite(L), 1, 'last');
+if ~isempty(v), level = L(v); src = 'last level (fallback)';
+else, level = mean(tr.pm); src = 'training mean (fallback)'; end
+end
+
+function [level, ok] = pm_short_term__static_ewma(tr, g, siteKeys, o, tRef, opts)
+% level_method 'ewma': weighted mean of the last 3 h; 'last': latest sample only
+num = 0; den = 0;
+for j = 1:numel(siteKeys)
+    idx = (g == siteKeys(j)) & tr.t >= tRef - 3/24 & tr.t <= tRef;
+    if ~any(idx), continue; end
+    if strcmp(opts.level_method, 'last')
+        tj = tr.t(idx); pj = tr.pm(idx); [~, k] = max(tj);
+        num = num + (pj(k) - o(j)); den = den + 1;
+        continue
+    end
+    w = exp(-(tRef - tr.t(idx)) * 1440 / opts.tau_min);
+    num = num + sum(w .* (tr.pm(idx) - o(j)));
+    den = den + sum(w);
+end
+ok = den > 0; level = num / max(den, eps);
+end
+
+function o = pm_short_term__fill_defaults(o)
+d.tau_min         = 2;      % EWMA time constant (min)
+d.level_method    = 'ewma'; % 'ewma' or 'last'
+d.bin_min         = 10;     % bin size (min)
+d.spike_k         = 12;     % spike threshold (robust sd)
+d.static_cover    = 0.5;    % static site: fraction of hours with data
+d.static_max_spd  = 2;      % static site: max median speed
+d.static_min_frac = 0.05;   % static site: min fraction of the busiest count
+d.min_site_corr   = 0.7;    % min correlation with the other sites
+d.idw_power       = 2;
+d.idw_min_km      = 0.2;
+d.offset_shrink   = 1;      % 0 = no site offset
+d.min_pred        = 1;      % lowest allowed prediction
+d.max_stale_min   = 30;     % max age of static data used as "now" (min)
+f = fieldnames(d);
+for i = 1:numel(f), if ~isfield(o, f{i}), o.(f{i}) = d.(f{i}); end, end
+end
+
+function s = pm_short_term__parse_matrix(X, isTrain)
+X = double(X);
+t = X(:, 1); m = pm_short_term__medn(t);
+if m > 1e11, t = t / 86400000 + 719529;          % POSIX ms
+elseif m > 1e8, t = t / 86400 + 719529; end      % POSIX s (else datenum)
+s.t = t; s.hmd = X(:, 2);
+c3 = X(:, 3); c4 = X(:, 4);
+% speed has a much smaller median than temperature
+if pm_short_term__medn(c3) < pm_short_term__medn(c4), s.tmp = c4; s.spd = c3; else, s.tmp = c3; s.spd = c4; end
+if isTrain, s.pm = X(:, 5); s.lat = X(:, 6); s.lon = X(:, 7);
+else, s.lat = X(:, 5); s.lon = X(:, 6); end
+end
+
+function X = pm_short_term__table_to_matrix(X, isTrain)
+% table -> [datenum hmd tmp spd (pm2d5) lat lon]; matrices are returned as is
+if ~isa(X, 'table'), return; end
+t = X.time;
+if isdatetime(t), t.TimeZone = ''; t = datenum(t); end
+if isTrain
+    X = [t, X.hmd, X.tmp, X.spd, X.pm2d5, X.lat, X.lon];
+else
+    X = [t, X.hmd, X.tmp, X.spd, X.lat, X.lon];
+end
+end
+
+function s = pm_short_term__subset(s, ok)
+f = fieldnames(s);
+for i = 1:numel(f), s.(f{i}) = s.(f{i})(ok); end
+end
+
+function sd = pm_short_term__persist_sd(Lv, binMin, hz)
+% RMS change of the level over each horizon, using only pairs where both
+% ends are observed
+sd = zeros(size(hz));
+for i = 1:numel(hz)
+    lag = max(1, round(hz(i) * 60 / binMin));
+    if lag < numel(Lv)
+        d = Lv(1+lag:end) - Lv(1:end-lag); d = d(isfinite(d));
+    else
+        d = [];
+    end
+    if numel(d) >= 5, sd(i) = sqrt(mean(d.^2));
+    else, v = Lv(isfinite(Lv)); sd(i) = std(v); end
+end
+end
+
+function d = pm_short_term__haversine_km(lat1, lon1, lat2, lon2)
+p = pi / 180;
+a = sin((lat2 - lat1) * p / 2).^2 + cos(lat1 * p) .* cos(lat2 * p) .* sin((lon2 - lon1) * p / 2).^2;
+d = 2 * 6371 * asin(min(1, sqrt(a)));
+end
+
+function r = pm_short_term__corr_simple(a, b)
+a = a - mean(a); b = b - mean(b);
+r = sum(a .* b) / sqrt(sum(a.^2) * sum(b.^2) + eps);
+end
+
+function m = pm_short_term__medn(x, dim)
+% median ignoring NaN
+if nargin < 2
+    x = x(isfinite(x)); if isempty(x), m = NaN; else, m = median(x); end, return
+end
+if dim == 2, x = x.'; end
+m = nan(1, size(x, 2));
+for j = 1:size(x, 2)
+    c = x(isfinite(x(:, j)), j); if ~isempty(c), m(j) = median(c); end
+end
+if dim == 2, m = m.'; end
 end

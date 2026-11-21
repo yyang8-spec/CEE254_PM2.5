@@ -41,7 +41,13 @@ try
                 else, S = load(fullfile(data, ['separated_train_data_' tag '.mat'])); tr = [S.train_data_static; S.train_data_mobile]; end
                 T = load(fullfile(data, ['test_data_' tag '.mat'])); te = T.test_data;
             end
-            tic; p = pm2d5_submit_check(tr, te, task); el = toc;
+            tic;
+        try
+            p = pm2d5_submit_check(tr, te, task);
+        catch e
+            fprintf('  %-22s ERROR: %s\n', tag, e.message); allOK = false; continue
+        end
+        el = toc;
             if isa(te, 'table'), M = height(te); else, M = size(te, 1); end
             ok = isequal(size(p), [M 1]) && all(isfinite(p)) && all(p >= 0 & p < 1000);
             extra = '';
