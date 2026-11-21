@@ -118,462 +118,156 @@ end
 % task-model files listed in each "from" line. Edit those files, not this one.
 % ===========================================================================
 
-% ===== from team_submission/pm_draft_level_model.m =====
-function [pred_pm2d5, pred_std] = pm_draft_level_model(train_data, test_data, problem_type, opts)
-%PM_DRAFT_LEVEL_MODEL  Draft model for long-term (2) and interpolation (3).
-%   Used by pm_long_term / pm_interpolation until they are replaced.
-%   PM(site, t) = L(t) + o(site)
-%     type 2: ridge regression of the city level on dew point + AR(1) residual
-%     type 3: city level interpolated in time across the missing window
+% ===== from team_submission/pm2d5_interp_model.m =====
+function pred_pm2d5 = pm2d5_interp_model(train_data, test_data, opts)
+%PM2D5_INTERP_MODEL  Space-time kernel interpolation of PM2.5 (problem_type 3).
+%
+%   pred_pm2d5 = pm2d5_interp_model(train_data, test_data)
+%   pred_pm2d5 = pm2d5_interp_model(train_data, test_data, opts)
+%
+%   train_data : P x 7  [time, humidity, temperature, speed, pm2d5, lat, lon]
+%   test_data  : M x 6  [time, humidity, temperature, speed, lat, lon]
+%   pred_pm2d5 : M x 1
+%
+%   Each prediction is a weighted average of the training readings, where
+%   the weight falls off with distance from the test location (Gaussian,
+%   bandwidth opts.hs in km) and with time from the test time (Gaussian,
+%   bandwidth opts.ht in minutes). This is kernel smoothing
+%   applied in space and time together.
+%
+%   Steps:
+%     1. Average raw readings into 1-minute, ~100 m bins (cuts noise and size).
+%     2. Drop fixed sites whose median PM2.5 is less than half or more than
+%        twice the overall median (catches a drifting sensor, such as
+%        Tianjin static sensor 6 after early May).
+%     3. Kernel-weighted average for each test row.
+%
+%   Weather columns are not used: they did not improve predictions in the
+%   feature-combination tests.
 
-if nargin < 4 || isempty(opts), opts = struct(); end
-train_data = pm_draft_level_model__table_to_matrix(train_data, true);
-test_data  = pm_draft_level_model__table_to_matrix(test_data, false);
-if problem_type == 1, error('pm_draft_level_model: problem_type 1 is handled by pm_short_term'); end
+if nargin < 3, opts = struct(); end
+hs        = pm2d5_interp_model__getOpt(opts, 'hs', 1.5);           % spatial bandwidth (km)
+ht        = pm2d5_interp_model__getOpt(opts, 'ht', 30);            % temporal bandwidth (minutes)
+useFilter = pm2d5_interp_model__getOpt(opts, 'siteFilter', true);  % drop drifting fixed sites
 
-opts = pm_draft_level_model__fill_opts(opts, pm_draft_level_model__default_opts(problem_type));
+%%\ 1. Clean and convert times to minutes
+[tTrain, tTest] = pm2d5_interp_model__toMinutes(train_data(:, 1), test_data(:, 1));
+pm  = train_data(:, 5);
+lat = train_data(:, 6);
+lon = train_data(:, 7);
 
-% ---------- 1. parse and clean inputs ---------------------------------------
-tr = pm_draft_level_model__parse_train(train_data);
-te = pm_draft_level_model__parse_test(test_data);
-tr = pm_draft_level_model__clean_train(tr, opts);
+ok = isfinite(tTrain) & isfinite(pm) & isfinite(lat) & isfinite(lon);
+tTrain = tTrain(ok);  pm = pm(ok);  lat = lat(ok);  lon = lon(ok);
 
-% ---------- 2. split static vs mobile, bin static sites --------------------
-[site, isStaticRow] = pm_draft_level_model__find_static_sites(tr, opts);
-
-M = numel(te.t);
-pred_pm2d5 = nan(M, 1);
-pred_std   = nan(M, 1);
-
-% predict each test location separately
-[locs, ~, locId] = unique(round([te.lat te.lon] * 1e5) / 1e5, 'rows');
-
-for k = 1:size(locs, 1)
-    rows = find(locId == k);
-    tgt.lat = locs(k, 1); tgt.lon = locs(k, 2);
-    tgt.t   = te.t(rows); tgt.hmd = te.hmd(rows); tgt.tmp = te.tmp(rows);
-
-    off = pm_draft_level_model__site_offset_at(tgt, site, tr, isStaticRow, opts);
-
-    switch problem_type
-        case 1, [L, sL] = pm_draft_level_model__level_short(tgt, site, opts);
-        case 2, [L, sL] = pm_draft_level_model__level_long(tgt, site, opts);
-        case 3, [L, sL] = pm_draft_level_model__level_interp(tgt, site, opts);
-        otherwise, error('problem_type must be 1, 2 or 3');
-    end
-    p = L + off.value;
-    pred_pm2d5(rows) = max(p, opts.min_pred);
-    pred_std(rows)   = sqrt(sL.^2 + off.sd.^2);
-end
-
-bad = ~isfinite(pred_pm2d5);
-if any(bad)
-    pred_pm2d5(bad) = mean(tr.pm, 'omitnan');
-    pred_std(bad) = std(tr.pm, 'omitnan');
-end
-end
-
-function o = pm_draft_level_model__default_opts(problem_type)
-o.min_pred        = 1;
-o.spike_mad_k     = 12;     % spike threshold (robust sd)
-o.static_cover    = 0.5;    % static site: fraction of hours with data
-o.static_max_spd  = 2;      % static site: max median speed
-o.static_min_frac = 0.05;   % static site: min fraction of the busiest count
-o.min_site_corr   = 0.7;
-o.idw_power       = 2;
-o.idw_min_km      = 0.2;
-o.offset_shrink   = 1.0;
-o.use_mobile_offset = false;
-o.mobile_radius_km  = 0.5;
-o.mobile_min_hours  = 3;
-switch problem_type
-    case 1
-        o.bin_min     = 10;
-        o.level_method = 'ewma';
-        o.ewma_tau_min = 5;
-        o.persist_bins = 1;
-        o.min_samples = 1000;
-        o.ar_damp     = false;
-    case 2
-        o.bin_min     = 60;
-        o.use_met     = true;
-        o.use_tmp     = false;
-        o.hum_feature = 'dewpt';    % 'rh' | 'dewpt' | 'both'
-        o.use_diurnal = false;
-        o.use_ar_resid = true;
-        o.ridge       = 1e-3;
-    case 3
-        o.bin_min     = 5;
-        o.interp_mode = 'idw_now';  % 'idw_now' | 'city_now' | 'time_interp' | 'blend'
-        o.blend_w     = 0.5;
-end
-end
-
-function o = pm_draft_level_model__fill_opts(o, d)
-f = fieldnames(d);
-for i = 1:numel(f)
-    if ~isfield(o, f{i}), o.(f{i}) = d.(f{i}); end
-end
-end
-
-function tr = pm_draft_level_model__parse_train(X)
-X = double(X);
-tr.t   = pm_draft_level_model__to_days(X(:, 1));
-c3 = X(:, 3); c4 = X(:, 4);
-% speed has a much smaller median than temperature
-if pm_draft_level_model__medn(c3) < pm_draft_level_model__medn(c4), tmp = c4; spd = c3; else, tmp = c3; spd = c4; end
-tr.hmd = X(:, 2); tr.tmp = tmp; tr.spd = spd;
-tr.pm  = X(:, 5); tr.lat = X(:, 6); tr.lon = X(:, 7);
-end
-
-function te = pm_draft_level_model__parse_test(X)
-X = double(X);
-te.t = pm_draft_level_model__to_days(X(:, 1));
-c3 = X(:, 3); c4 = X(:, 4);
-if pm_draft_level_model__medn(c3) < pm_draft_level_model__medn(c4), tmp = c4; spd = c3; else, tmp = c3; spd = c4; end
-te.hmd = X(:, 2); te.tmp = tmp; te.spd = spd;
-te.lat = X(:, 5); te.lon = X(:, 6);
-end
-
-function d = pm_draft_level_model__to_days(t)
-% datenum, POSIX seconds or POSIX milliseconds
-m = pm_draft_level_model__medn(t);
-if m > 1e11
-    d = t / 86400000 + 719529;
-elseif m > 1e8
-    d = t / 86400 + 719529;
-else
-    d = t;
-end
-end
-
-function tr = pm_draft_level_model__clean_train(tr, opts)
-ok = isfinite(tr.t) & isfinite(tr.pm) & isfinite(tr.lat) & isfinite(tr.lon);
-ok = ok & ~(tr.lat == 0 & tr.lon == 0);
-mlat = median(tr.lat(ok)); mlon = median(tr.lon(ok));
-ok = ok & abs(tr.lat - mlat) < 0.5 & abs(tr.lon - mlon) < 0.5;
-% gross spikes only; negative values are kept
-p = tr.pm(ok);
-med = median(p); s = 1.4826 * median(abs(p - med));
-ok = ok & tr.pm <= med + opts.spike_mad_k * max(s, 1);
-f = fieldnames(tr);
-for i = 1:numel(f), tr.(f{i}) = tr.(f{i})(ok); end
-end
-
-function [site, isStaticRow] = pm_draft_level_model__find_static_sites(tr, opts)
-th = floor(tr.t * 24);
-nHours = max(th) - min(th) + 1;
-key = round([tr.lat tr.lon] * 1e5);
-[ukey, ~, g] = unique(key, 'rows');
-cnt = accumarray(g, 1);
-% the sample-count condition excludes parked vehicles
-cand = find(cnt > 200 & cnt >= opts.static_min_frac * max(cnt));
-isSite = false(size(ukey, 1), 1);
-for c = cand'
-    idx = (g == c);
-    cover = numel(unique(th(idx))) / nHours;
-    if cover >= opts.static_cover && median(tr.spd(idx)) < opts.static_max_spd
-        isSite(c) = true;
-    end
-end
-isStaticRow = isSite(g);
-siteKeys = find(isSite);
-
-% binning
-binDays = opts.bin_min / 1440;
-b0 = floor(min(tr.t) / binDays);
-b1 = floor(max(tr.t) / binDays);
-nb = b1 - b0 + 1;
-S = nan(nb, numel(siteKeys)); H = S; T = S; N = zeros(nb, numel(siteKeys));
-lat = zeros(1, numel(siteKeys)); lon = lat;
-for j = 1:numel(siteKeys)
-    idx = (g == siteKeys(j));
-    b = floor(tr.t(idx) / binDays) - b0 + 1;
-    n = accumarray(b, 1, [nb 1]);
-    S(:, j) = accumarray(b, tr.pm(idx),  [nb 1]) ./ n;
-    H(:, j) = accumarray(b, tr.hmd(idx), [nb 1]) ./ n;
-    T(:, j) = accumarray(b, tr.tmp(idx), [nb 1]) ./ n;
-    N(:, j) = n;
-    lat(j) = ukey(siteKeys(j), 1) / 1e5; lon(j) = ukey(siteKeys(j), 2) / 1e5;
-end
-S(N == 0) = NaN; H(N == 0) = NaN; T(N == 0) = NaN;
-
-% drop sites that do not follow the others
-keep = true(1, size(S, 2));
-if size(S, 2) >= 3
-    for j = 1:size(S, 2)
-        others = pm_draft_level_model__medn(S(:, setdiff(1:size(S, 2), j)), 2);
-        v = isfinite(others) & isfinite(S(:, j));
-        if sum(v) > 10
-            r = pm_draft_level_model__corr_simple(S(v, j), others(v));
-            if r < opts.min_site_corr, keep(j) = false; end
-        end
-    end
-end
-if ~any(keep), keep(:) = true; end
-S = S(:, keep); H = H(:, keep); T = T(:, keep); N = N(:, keep);
-lat = lat(keep); lon = lon(keep);
-
-% raw samples of the last 3 h per site
-kk = siteKeys(keep); tEnd = max(tr.t(isStaticRow));
-site.rt = cell(1, numel(kk)); site.rp = site.rt;
-for j = 1:numel(kk)
-    idx = (g == kk(j)) & tr.t >= tEnd - 3/24;
-    site.rt{j} = tr.t(idx); site.rp{j} = tr.pm(idx);
-end
-site.tEnd = tEnd;
-
-% S = city level + site offset
-o = zeros(1, size(S, 2));
-for it = 1:3
-    L = mean(S - o, 2, 'omitnan');
-    o = mean(S - L, 1, 'omitnan');
-    o = o - mean(o);
-end
-
-site.S = S; site.H = H; site.T = T; site.N = N;
-site.lat = lat; site.lon = lon; site.offset = o;
-site.L = L;
-site.Hc = mean(H, 2, 'omitnan'); site.Tc = mean(T, 2, 'omitnan');
-site.tb = ((b0:b1)' + 0.5) * binDays;          % bin centres
-site.binDays = binDays;
-site.dropped = sum(~keep);
-end
-
-function r = pm_draft_level_model__corr_simple(a, b)
-a = a - mean(a); b = b - mean(b);
-r = sum(a .* b) / sqrt(sum(a .^ 2) * sum(b .^ 2) + eps);
-end
-
-function w = pm_draft_level_model__idw_weights(lat0, lon0, lat, lon, opts)
-d = pm_draft_level_model__haversine_km(lat0, lon0, lat, lon);
-w = 1 ./ max(d, opts.idw_min_km) .^ opts.idw_power;
-w = w / sum(w);
-end
-
-function d = pm_draft_level_model__haversine_km(lat1, lon1, lat2, lon2)
-p = pi / 180;
-a = sin((lat2 - lat1) * p / 2) .^ 2 + cos(lat1 * p) .* cos(lat2 * p) .* sin((lon2 - lon1) * p / 2) .^ 2;
-d = 2 * 6371 * asin(min(1, sqrt(a)));
-end
-
-function off = pm_draft_level_model__site_offset_at(tgt, site, tr, isStaticRow, opts)
-w = pm_draft_level_model__idw_weights(tgt.lat, tgt.lon, site.lat, site.lon, opts);
-o_idw = sum(w .* site.offset);
-off.value = opts.offset_shrink * o_idw;
-off.sd = std(site.offset);
-if isnan(off.sd), off.sd = 0; end
-
-if opts.use_mobile_offset
-    mob = ~isStaticRow;
-    if any(mob)
-        d = pm_draft_level_model__haversine_km(tgt.lat, tgt.lon, tr.lat(mob), tr.lon(mob));
-        near = d < opts.mobile_radius_km;
-        if any(near)
-            tm = tr.t(mob); pm = tr.pm(mob);
-            b  = floor(tm / site.binDays);
-            bs = floor(site.tb / site.binDays);
-            [ub, ~, gb] = unique(b);
-            medAll = accumarray(gb, pm, [], @median);
-            [tf, loc] = ismember(ub, bs);
-            Lb = nan(size(ub)); Lb(tf) = site.L(loc(tf));
-            v = isfinite(Lb) & medAll > 0;
-            ratio = median(Lb(v) ./ medAll(v));
-            bn = b(near); [ubn, ~, gn] = unique(bn);
-            mn = accumarray(gn, pm(near), [], @median) * ratio;
-            [tf, loc] = ismember(ubn, bs);
-            an = mn(tf) - site.L(loc(tf));
-            an = an(isfinite(an));
-            if numel(an) >= opts.mobile_min_hours * (60 / opts.bin_min)
-                s2m = var(an) / numel(an) + (0.3 * std(an))^2;
-                s2s = off.sd^2 + eps;
-                wm = s2s / (s2s + s2m);
-                off.value = (1 - wm) * off.value + wm * median(an);
-                off.sd = sqrt(1 / (1 / s2s + 1 / s2m));
-            end
-        end
-    end
-end
-end
-
-function [L, sL] = pm_draft_level_model__level_short(tgt, site, opts)
-Lc = site.L; v = find(isfinite(Lc));
-if strcmp(opts.level_method, 'ewma')
-    % EWMA of the offset-corrected static samples of the last 3 h
-    num = 0; den = 0;
-    for j = 1:numel(site.rt)
-        if isempty(site.rt{j}), continue; end
-        w = exp(-(site.tEnd - site.rt{j}) * 1440 / opts.ewma_tau_min);
-        num = num + sum(w .* (site.rp{j} - site.offset(j))); den = den + sum(w);
-    end
-    if den > 0
-        last = num / den;
-        hz = max(tgt.t - site.tEnd, 0) * 24;
-        L = repmat(last, size(tgt.t));
-        sL = pm_draft_level_model__persistence_sd(Lc(v), opts.bin_min, hz);
-        return
-    end
-end
-% level from the most recent bins covering at least min_samples samples
-A = site.S - site.offset; Nw = site.N; Nw(~isfinite(A)) = 0; A(~isfinite(A)) = 0;
-num = 0; den = 0; nb = 0;
-for b = v(end):-1:1
-    num = num + sum(Nw(b, :) .* A(b, :)); den = den + sum(Nw(b, :)); nb = nb + 1;
-    if nb >= opts.persist_bins && den >= opts.min_samples, break; end
-end
-last = num / max(den, 1);
-tLast = site.tb(v(end));
-hz = max(tgt.t - tLast, 0) * 24;
-if opts.ar_damp
-    [phi, mu] = pm_draft_level_model__ar1_fit(Lc(v), round(60 / opts.bin_min), 24 * 60 / opts.bin_min);
-    L = mu + phi .^ hz .* (last - mu);
-else
-    L = repmat(last, size(tgt.t));
-end
-sL = pm_draft_level_model__persistence_sd(Lc(v), opts.bin_min, hz);
-end
-
-function [L, sL] = pm_draft_level_model__level_long(tgt, site, opts)
-y = site.L; Hc = site.Hc; Tc = site.Tc; tb = site.tb;
-v = isfinite(y) & isfinite(Hc) & isfinite(Tc);
-Xtr = pm_draft_level_model__design(tb(v), Hc(v), Tc(v), opts);
-ytr = y(v);
-mu = mean(Xtr(:, 2:end), 1); sd = std(Xtr(:, 2:end), 0, 1); sd(sd == 0) = 1;
-Z = [ones(sum(v), 1), (Xtr(:, 2:end) - mu) ./ sd];
-R = opts.ridge * eye(size(Z, 2)); R(1, 1) = 0;
-beta = (Z' * Z + size(Z, 1) * R) \ (Z' * ytr);
-
-hf = tgt.hmd; tf = tgt.tmp;
-hf(~isfinite(hf)) = mean(Hc(v));
-tf(~isfinite(tf)) = mean(Tc(v));
-Xf = pm_draft_level_model__design(tgt.t, hf, tf, opts);
-% clip features to the training range
-lo = min(Xtr, [], 1); hi = max(Xtr, [], 1);
-Xf = min(max(Xf, lo), hi);
-Zf = [ones(numel(tgt.t), 1), (Xf(:, 2:end) - mu) ./ sd];
-L = Zf * beta;
-
-res = ytr - Z * beta;
-hz = max(tgt.t - tb(find(v, 1, 'last')), 0) * 24;
-if opts.use_ar_resid && numel(res) > 5
-    phi = max(0, min(1, sum(res(1:end-1) .* res(2:end)) / sum(res(1:end-1) .^ 2)));
-    L = L + phi .^ hz .* res(end);
-    sL = std(res) * sqrt(1 - phi .^ (2 * hz));
-else
-    sL = repmat(std(res), size(hz));
-end
-L = min(max(L, min(ytr)), max(ytr));
-end
-
-function X = pm_draft_level_model__design(t, h, tm, opts)
-X = ones(numel(t), 1);
-if opts.use_met
-    switch opts.hum_feature
-        case 'rh',     X = [X, h(:)];
-        case 'dewpt',  X = [X, pm_draft_level_model__dewpoint(tm(:), h(:))];
-        case 'both',   X = [X, h(:), pm_draft_level_model__dewpoint(tm(:), h(:))];
-    end
-end
-if opts.use_met && opts.use_tmp, X = [X, tm(:)]; end
-if opts.use_diurnal
-    w = 2 * pi * mod(t(:), 1);
-    X = [X, sin(w), cos(w), sin(2 * w), cos(2 * w)];
-end
-end
-
-function [L, sL] = pm_draft_level_model__level_interp(tgt, site, opts)
-tb = site.tb; binDays = site.binDays;
-bt = floor(tgt.t / binDays);
-bs = floor(tb / binDays);
-[tf, loc] = ismember(bt, bs);
-Lc = site.L;
-v = isfinite(Lc);
-Lint = interp1(tb(v), Lc(v), (bt + 0.5) * binDays, 'linear', 'extrap');
-
-Lnow = nan(size(tgt.t)); Inow = Lnow;
-w = pm_draft_level_model__idw_weights(tgt.lat, tgt.lon, site.lat, site.lon, opts);
-for i = 1:numel(tgt.t)
-    if tf(i)
-        Lnow(i) = Lc(loc(i));
-        s = site.S(loc(i), :); m = isfinite(s);
-        if any(m), Inow(i) = sum(w(m) .* s(m)) / sum(w(m)); end
-    end
-end
-off = opts.offset_shrink * sum(w .* site.offset);
-switch opts.interp_mode
-    case 'idw_now'
-        L = Inow - off;
-    case 'city_now'
-        L = Lnow;
-    case 'time_interp'
-        L = Lint;
-    case 'blend'
-        L = opts.blend_w * (Inow - off) + (1 - opts.blend_w) * Lint;
-end
-miss = ~isfinite(L);
-L(miss) = Lint(miss);
-sL = repmat(std(site.offset), size(L));
-sL(miss) = sL(miss) * 2;
-end
-
-function [phi, mu] = pm_draft_level_model__ar1_fit(x, lag, muWin)
-x = x(:);
-mu = mean(x(max(1, end - muWin + 1):end));
-a = x(1:end-lag) - mu; b = x(1+lag:end) - mu;
-phi = max(0, min(1, sum(a .* b) / sum(a .^ 2)));
-end
-
-function s = pm_draft_level_model__persistence_sd(x, binMin, hz)
-x = x(:); s = zeros(size(hz));
-for i = 1:numel(hz)
-    lag = max(1, round(hz(i) * 60 / binMin));
-    if lag < numel(x)
-        e = x(1+lag:end) - x(1:end-lag);
-        s(i) = sqrt(mean(e .^ 2));
-    else
-        s(i) = std(x);
-    end
-end
-end
-
-function m = pm_draft_level_model__medn(x, dim)
-% median ignoring NaN
-if nargin < 2
-    x = x(isfinite(x)); if isempty(x), m = NaN; else, m = median(x); end
+if isempty(pm)
+    pred_pm2d5 = NaN(size(test_data, 1), 1);
     return
 end
-if dim == 2, x = x.'; end
-m = nan(1, size(x, 2));
-for j = 1:size(x, 2)
-    c = x(isfinite(x(:, j)), j); if ~isempty(c), m(j) = median(c); end
-end
-if dim == 2, m = m.'; end
+
+%%\ 2. Average into 1-minute, ~100 m bins
+minuteKey = floor(tTrain - min(tTrain));
+latKey    = round(lat / 0.001);
+lonKey    = round(lon / 0.001);
+[keys, ~, g] = unique([minuteKey, latKey, lonKey], 'rows');
+
+nBin   = accumarray(g, 1);
+binPM  = accumarray(g, pm)     ./ nBin;
+binT   = accumarray(g, tTrain) ./ nBin;
+binLat = accumarray(g, lat)    ./ nBin;
+binLon = accumarray(g, lon)    ./ nBin;
+
+%%\ 3. Drop fixed sites that disagree strongly with everyone else
+if useFilter
+    [~, ~, site] = unique(keys(:, 2:3), 'rows');
+    siteCount = accumarray(site, 1);              % minutes of data per ~100 m cell
+    siteMed   = accumarray(site, binPM, [], @median);
+    allMed    = median(binPM);
+    badSite   = siteCount >= 1000 & ...
+                (siteMed < 0.5 * allMed | siteMed > 2 * allMed);
+    keep = ~badSite(site);
+    if any(keep)
+        binPM = binPM(keep);  binT = binT(keep);
+        binLat = binLat(keep);  binLon = binLon(keep);
+    end
 end
 
-function td = pm_draft_level_model__dewpoint(T, RH)
-% dew point (Magnus formula), deg C
-a = 17.62; b = 243.12;
-g = log(min(max(RH, 1), 100) / 100) + a * T ./ (b + T);
-td = b * g ./ (a - g);
+%%\ 4. Kernel-weighted average for each test row
+kmPerDegLon = 111.32 * cosd(mean(binLat));
+kmPerDegLat = 110.57;
+
+M = size(test_data, 1);
+pred_pm2d5 = NaN(M, 1);
+
+for i = 1:M
+    dt = binT - tTest(i);
+    near = abs(dt) <= 4 * ht;                 % weights beyond 4*ht are ~0
+    if ~any(near), near = true(size(dt)); end
+
+    dx = (binLon(near) - test_data(i, 6)) * kmPerDegLon;
+    dy = (binLat(near) - test_data(i, 5)) * kmPerDegLat;
+    w  = exp(-0.5 * (dx.^2 + dy.^2) / hs^2 - 0.5 * (dt(near) / ht).^2);
+
+    if sum(w) < 1e-12
+        % No readings close in space: fall back to time weighting only
+        w = exp(-0.5 * (dt(near) / ht).^2);
+    end
+    pred_pm2d5(i) = sum(w .* binPM(near)) / sum(w);
+end
 end
 
-function X = pm_draft_level_model__table_to_matrix(X, isTrain)
-% table [time hmd spd tmp (pm2d5) lat lon] -> [datenum hmd tmp spd (pm2d5) lat lon]
-if ~isa(X, 'table'), return; end
-t = X.time;
-if isdatetime(t), t.TimeZone = ''; t = datenum(t); end
-if isTrain, X = [t, X.hmd, X.tmp, X.spd, X.pm2d5, X.lat, X.lon];
-else,       X = [t, X.hmd, X.tmp, X.spd, X.lat, X.lon]; end
+
+%%\ ---------------- Helpers ----------------
+function v = pm2d5_interp_model__getOpt(opts, name, default)
+if isfield(opts, name), v = opts.(name); else, v = default; end
+end
+
+function [tTrainMin, tTestMin] = pm2d5_interp_model__toMinutes(tTrain, tTest)
+% Converts numeric times to minutes. Detects the unit from the size of the
+% values: POSIX milliseconds, POSIX seconds, or MATLAB datenum (days).
+ref = median(tTrain(isfinite(tTrain)));
+if ref > 1e11
+    scale = 1 / 60000;      % POSIX milliseconds
+elseif ref > 1e8
+    scale = 1 / 60;         % POSIX seconds
+elseif ref > 1e5
+    scale = 1440;           % datenum (days)
+else
+    error('pm2d5_interp_model:timeUnit', ...
+        'Unrecognized time units (median value %g). Check column 1.', ref);
+end
+tTrainMin = tTrain * scale;
+tTestMin  = tTest  * scale;
 end
 
 % ===== from team_submission/pm_interpolation.m =====
 function pred_pm2d5 = pm_interpolation(train_data, test_data, opts)
 %PM_INTERPOLATION  PM2.5 interpolation (5-min values on day 2), problem_type 3.
 %   pred_pm2d5: M x 1, same row order as test_data.
-%   TODO (interpolation owner): replace the line below with the interpolation model.
+%   Converts the graders' tables to the matrix layout that
+%   pm2d5_interp_model expects, then runs the space-time kernel model.
 
 if nargin < 3, opts = struct(); end
-pred_pm2d5 = pm_draft_level_model(train_data, test_data, 3, opts);
+Xtrain = pm_interpolation__interp_to_matrix(train_data, true);
+Xtest  = pm_interpolation__interp_to_matrix(test_data, false);
+pred_pm2d5 = pm2d5_interp_model(Xtrain, Xtest, opts);
+end
+
+function X = pm_interpolation__interp_to_matrix(T, hasPM)
+% Table -> [time hmd tmp spd (pm2d5) lat lon]; matrices pass through unchanged.
+% Only time, pm2d5, lat and lon are used by the model; weather is NaN-filled
+% if a column is missing.
+if ~istable(T), X = double(T); return, end
+n = height(T);
+t = T.time;
+if isdatetime(t), t = datenum(t); end
+X = [double(t), pm_interpolation__getCol(T, 'hmd', n), pm_interpolation__getCol(T, 'tmp', n), pm_interpolation__getCol(T, 'spd', n)];
+if hasPM, X = [X, double(T.pm2d5)]; end
+X = [X, double(T.lat), double(T.lon)];
+end
+
+function v = pm_interpolation__getCol(T, name, n)
+if any(strcmp(T.Properties.VariableNames, name)), v = double(T.(name));
+else, v = NaN(n, 1); end
 end
 
 % ===== from team_submission/pm_long_term.m =====

@@ -17,8 +17,7 @@ Do not edit `SUBMIT/pm2d5_pred_model.m` by hand; it is generated.
 | `pm2d5_pred_model.m` | Dispatcher: calls the task model by problem_type; for long-term it splits the training data into static/mobile and estimates the noise level; then checks the output (M × 1, NaN replaced) | team |
 | `pm_short_term.m` | Short-term model (problem_type 1), final | short-term lead |
 | `pm_long_term.m` | Long-term model (problem_type 2). The dispatcher passes it the training data split into static and mobile tables, plus the estimated noise level (`opts.var_level` = 0, 5 or 10) | long-term owner |
-| `pm_interpolation.m` | Interpolation model (problem_type 3). **Placeholder** that calls the draft model | interpolation owner |
-| `pm_draft_level_model.m` | Earlier all-in-one draft used by the two placeholders. Delete it once both are replaced | — |
+| `pm_interpolation.m`, `pm2d5_interp_model.m` | Interpolation model (problem_type 3): space-time kernel smoothing | interpolation owner |
 | `build_submission.m` | Combines all of the above into `SUBMIT/pm2d5_pred_model.m` | — |
 | `check_submission.m` | Runs the built file in an empty folder on all 9 competition files and checks every output | — |
 
@@ -53,6 +52,6 @@ Do not edit `SUBMIT/pm2d5_pred_model.m` by hand; it is generated.
 * **Noise files contain negative PM values** (down to −115 at 1.0σ). Keep them: removing or clipping them biases every mean upward.
 * **Test sites are fixed sensors** (speed ≈ 0) with no data in `train_data`.
 
-## Current state (11/20)
+## Current state
 
-`check_submission.m`: all 9 tests run and pass the format checks. Short-term is identical to `short_term_pipeline/submissions` (means 78.93 / 78.82 / 78.54). Long-term and interpolation still use the draft model.
+All three task models are in: short-term, long-term and interpolation. `SUBMIT/pm2d5_pred_model.m` is built from them.

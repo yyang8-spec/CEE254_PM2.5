@@ -5,7 +5,7 @@
 % Writes team_submission/SUBMIT/pm2d5_pred_model.m: the dispatcher
 % (pm2d5_pred_model.m) followed by every task-model file as local functions:
 %   every other .m in team_submission/ (pm_short_term.m, pm_long_term.m,
-%   pm_interpolation.m, pm_draft_level_model.m, and any helper files added)
+%   pm_interpolation.m, pm2d5_interp_model.m, and any helper files added)
 % To avoid name clashes, each file's HELPER functions are renamed
 % <filename>__<helper> inside that file's text. The main function of each file
 % keeps its name, so files call each other as usual.
