@@ -21,3 +21,7 @@ octave-workspace
 !data/competition/*.mat
 !short_term_pipeline/submissions/*.mat
 !short_term_pipeline/results/*.mat
+
+# Python
+__pycache__/
+.pytest_cache/
